@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="800" viewBox="0 0 1400 800">
+  <rect width="1400" height="800" fill="#ffffff"/>
+  <rect x="40" y="40" width="1320" height="720" rx="28" fill="none" stroke="#202020" stroke-width="4"/>
+  <g fill="#111111" font-family="Arial, 'Noto Sans JP', sans-serif">
+    <text x="110" y="165" font-size="58" font-weight="700">株式会社ABC</text>
+    <text x="110" y="255" font-size="42">営業部</text>
+    <text x="110" y="350" font-size="68" font-weight="700">山田 太郎</text>
+    <text x="110" y="485" font-size="42">TEL 090-1234-5678</text>
+    <text x="110" y="585" font-size="52" font-weight="700">taro . yamada @ example . co . jp</text>
+    <text x="110" y="675" font-size="34">東京都千代田区1-2-3</text>
+  </g>
+</svg>
