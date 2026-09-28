@@ -4,21 +4,28 @@ import {
   CalendarDays,
   CalendarPlus,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Cloud,
   CloudOff,
   ExternalLink,
   Link2,
   Loader2,
+  MapPin,
+  Clock,
   RefreshCw,
   Users,
   XCircle,
+  X,
 } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { EmptyState, ErrorState, LoadingState } from "@/components/data-state";
 import { appFetch } from "@/lib/client-api";
 import { useAppData } from "@/lib/use-app-data";
 
-/* ── Types matching /api/google/calendar/events GET response ── */
+/* ── Types ── */
+type EventType = "regular" | "guest" | "external";
+
 type LocalEvent = {
   id: string;
   name: string;
@@ -33,6 +40,7 @@ type LocalEvent = {
   calendar_sync_status: "local" | "pending" | "synced" | "failed";
   calendar_error: string | null;
   all_day: boolean;
+  event_type: EventType;
   event_contacts: Array<{ contact: { classification: string } | null }>;
 };
 
@@ -58,6 +66,76 @@ type EventsData = {
   googleEvents: GoogleEvent[];
   calendarError?: string;
 };
+
+/* ── Constants ── */
+const EVENT_TYPE_CONFIG: Record<
+  EventType,
+  { label: string; bg: string; text: string; dot: string }
+> = {
+  regular: {
+    label: "定例会",
+    bg: "bg-[#d4edda]",
+    text: "text-[#155724]",
+    dot: "bg-[#28a745]",
+  },
+  guest: {
+    label: "ゲスト参加回",
+    bg: "bg-[#fff3cd]",
+    text: "text-[#856404]",
+    dot: "bg-[#ffc107]",
+  },
+  external: {
+    label: "外部イベント",
+    bg: "bg-[#f8d7da]",
+    text: "text-[#721c24]",
+    dot: "bg-[#dc3545]",
+  },
+};
+
+const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
+const MONTH_NAMES = [
+  "JANUARY",
+  "FEBRUARY",
+  "MARCH",
+  "APRIL",
+  "MAY",
+  "JUNE",
+  "JULY",
+  "AUGUST",
+  "SEPTEMBER",
+  "OCTOBER",
+  "NOVEMBER",
+  "DECEMBER",
+];
+
+/* ── Calendar helpers ── */
+function getDaysInMonth(year: number, month: number) {
+  return new Date(year, month + 1, 0).getDate();
+}
+
+function getFirstDayOfWeek(year: number, month: number) {
+  return new Date(year, month, 1).getDay();
+}
+
+function isSameDay(d1: Date, d2: Date) {
+  return (
+    d1.getFullYear() === d2.getFullYear() &&
+    d1.getMonth() === d2.getMonth() &&
+    d1.getDate() === d2.getDate()
+  );
+}
+
+function formatTime(dateStr: string) {
+  const d = new Date(dateStr);
+  return `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function formatTimeRange(start: string, end: string | null, allDay: boolean) {
+  if (allDay) return "終日";
+  const s = formatTime(start);
+  if (!end) return s;
+  return `${s}–${formatTime(end)}`;
+}
 
 /* ── Formatting helpers ── */
 const fmt = new Intl.DateTimeFormat("ja-JP", {
@@ -119,6 +197,127 @@ function SyncBadge({
   );
 }
 
+/* ── Event detail modal ── */
+function EventDetailModal({
+  event,
+  isSelected,
+  onClose,
+  onSelect,
+  busy,
+}: {
+  event: LocalEvent;
+  isSelected: boolean;
+  onClose: () => void;
+  onSelect: (id: string) => void;
+  busy: boolean;
+}) {
+  const cfg = EVENT_TYPE_CONFIG[event.event_type];
+  const contactCount = event.event_contacts.length;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-t-2xl bg-white p-5 sm:rounded-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-3 flex items-start justify-between">
+          <div className="flex items-center gap-2">
+            <span className={`rounded-full px-2 py-0.5 text-xs font-black ${cfg.bg} ${cfg.text}`}>
+              {cfg.label}
+            </span>
+            {isSelected && (
+              <span className="rounded-full bg-[#176b45] px-2 py-0.5 text-[10px] font-black text-white">
+                現在のイベント
+              </span>
+            )}
+            <SyncBadge status={event.calendar_sync_status} error={event.calendar_error} />
+          </div>
+          <button onClick={onClose} className="rounded-lg p-1 hover:bg-[#f1f3f1]">
+            <X size={18} />
+          </button>
+        </div>
+        <h3 className="text-xl font-black">{event.name}</h3>
+        <div className="mt-2 space-y-1 text-sm text-[#6e7972]">
+          <p className="flex items-center gap-1.5">
+            <Clock size={14} />
+            {formatRange(event.starts_at, event.ends_at, event.all_day)}
+          </p>
+          {event.location && (
+            <p className="flex items-center gap-1.5">
+              <MapPin size={14} />
+              {event.location}
+            </p>
+          )}
+        </div>
+        {event.description && (
+          <p className="mt-3 text-sm text-[#68746d]">{event.description}</p>
+        )}
+        {contactCount > 0 && (
+          <p className="mt-3 flex items-center gap-1.5 text-sm font-bold text-[#176b45]">
+            <Users size={14} />
+            交換人数: {contactCount}名
+          </p>
+        )}
+        <div className="mt-4 flex gap-2">
+          {!isSelected && (
+            <button
+              className="btn-primary flex-1 py-2 text-sm"
+              disabled={busy}
+              onClick={() => onSelect(event.id)}
+            >
+              現在のイベントにする
+            </button>
+          )}
+          {event.google_html_link && (
+            <a
+              href={event.google_html_link}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn-secondary inline-flex items-center gap-1 py-2 text-sm"
+            >
+              <ExternalLink size={13} />
+              Googleで開く
+            </a>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Calendar event chip (inside day cell) ── */
+function CalendarEventChip({
+  event,
+  onClick,
+}: {
+  event: LocalEvent;
+  onClick: () => void;
+}) {
+  const cfg = EVENT_TYPE_CONFIG[event.event_type];
+  return (
+    <button
+      onClick={onClick}
+      className={`w-full rounded-md px-1.5 py-0.5 text-left text-[10px] leading-tight transition hover:opacity-80 ${cfg.bg} ${cfg.text}`}
+    >
+      <span className="font-bold line-clamp-1">{event.name}</span>
+      {event.location && (
+        <span className="flex items-center gap-0.5 opacity-80">
+          <MapPin size={8} className="shrink-0" />
+          <span className="line-clamp-1">{event.location}</span>
+        </span>
+      )}
+      {!event.all_day && (
+        <span className="flex items-center gap-0.5 opacity-80">
+          <Clock size={8} className="shrink-0" />
+          {formatTimeRange(event.starts_at, event.ends_at, event.all_day)}
+        </span>
+      )}
+    </button>
+  );
+}
+
 /* ── Main page ── */
 export default function EventsPage() {
   const state = useAppData<EventsData>("/api/google/calendar/events");
@@ -128,12 +327,88 @@ export default function EventsPage() {
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
   const [location, setLocation] = useState("");
+  const [eventType, setEventType] = useState<EventType>("regular");
   const [makeCurrent, setMakeCurrent] = useState(true);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [tab, setTab] = useState<"local" | "google">("local");
+  const [view, setView] = useState<"calendar" | "list" | "google">("calendar");
+  const [selectedEvent, setSelectedEvent] = useState<LocalEvent | null>(null);
 
-  /* ── Create event via Google Calendar events API ── */
+  /* Calendar month state */
+  const today = new Date();
+  const [calYear, setCalYear] = useState(today.getFullYear());
+  const [calMonth, setCalMonth] = useState(today.getMonth());
+
+  function prevMonth() {
+    if (calMonth === 0) {
+      setCalYear((y) => y - 1);
+      setCalMonth(11);
+    } else {
+      setCalMonth((m) => m - 1);
+    }
+  }
+  function nextMonth() {
+    if (calMonth === 11) {
+      setCalYear((y) => y + 1);
+      setCalMonth(0);
+    } else {
+      setCalMonth((m) => m + 1);
+    }
+  }
+  function goToday() {
+    setCalYear(today.getFullYear());
+    setCalMonth(today.getMonth());
+  }
+
+  /* Build calendar grid */
+  const calendarDays = useMemo(() => {
+    const daysInMonth = getDaysInMonth(calYear, calMonth);
+    const firstDay = getFirstDayOfWeek(calYear, calMonth);
+    const prevMonthDays = getDaysInMonth(
+      calMonth === 0 ? calYear - 1 : calYear,
+      calMonth === 0 ? 11 : calMonth - 1,
+    );
+    const cells: Array<{
+      day: number;
+      month: number;
+      year: number;
+      isCurrentMonth: boolean;
+    }> = [];
+
+    // Previous month's trailing days
+    for (let i = firstDay - 1; i >= 0; i--) {
+      cells.push({
+        day: prevMonthDays - i,
+        month: calMonth === 0 ? 11 : calMonth - 1,
+        year: calMonth === 0 ? calYear - 1 : calYear,
+        isCurrentMonth: false,
+      });
+    }
+    // Current month
+    for (let d = 1; d <= daysInMonth; d++) {
+      cells.push({
+        day: d,
+        month: calMonth,
+        year: calYear,
+        isCurrentMonth: true,
+      });
+    }
+    // Next month's leading days
+    const remaining = 7 - (cells.length % 7);
+    if (remaining < 7) {
+      for (let d = 1; d <= remaining; d++) {
+        cells.push({
+          day: d,
+          month: calMonth === 11 ? 0 : calMonth + 1,
+          year: calMonth === 11 ? calYear + 1 : calYear,
+          isCurrentMonth: false,
+        });
+      }
+    }
+    return cells;
+  }, [calYear, calMonth]);
+
+  /* ── Create event ── */
   async function create() {
     setBusy(true);
     setError("");
@@ -152,6 +427,7 @@ export default function EventsPage() {
           location,
           description,
           makeCurrent,
+          eventType,
         }),
       });
       setOpen(false);
@@ -160,6 +436,7 @@ export default function EventsPage() {
       setStart("");
       setEnd("");
       setLocation("");
+      setEventType("regular");
       await state.reload();
     } catch (e) {
       setError(e instanceof Error ? e.message : "保存できませんでした。");
@@ -178,6 +455,7 @@ export default function EventsPage() {
         body: JSON.stringify({ action: "select", localEventId: id }),
       });
       await state.reload();
+      setSelectedEvent(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "選択できませんでした。");
     } finally {
@@ -222,7 +500,6 @@ export default function EventsPage() {
 
   const localEvents = data.localEvents;
   const googleEvents = data.googleEvents;
-  /* Filter Google events that are NOT already imported locally */
   const importedGoogleIds = new Set(
     localEvents
       .map((e) => e.google_calendar_event_id)
@@ -231,6 +508,16 @@ export default function EventsPage() {
   const unimportedGoogleEvents = googleEvents.filter(
     (ge) => !importedGoogleIds.has(ge.googleEventId),
   );
+
+  /* Group events by date for calendar */
+  const eventsByDate = new Map<string, LocalEvent[]>();
+  for (const ev of localEvents) {
+    const d = new Date(ev.starts_at);
+    const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+    const arr = eventsByDate.get(key) ?? [];
+    arr.push(ev);
+    eventsByDate.set(key, arr);
+  }
 
   const counts = (e: LocalEvent) => {
     const c = { important: 0, courtesy: 0, undecided: 0 };
@@ -308,6 +595,26 @@ export default function EventsPage() {
             value={name}
             onChange={(e) => setName(e.target.value)}
           />
+          {/* Event type selector */}
+          <div className="grid grid-cols-3 gap-2">
+            {(Object.entries(EVENT_TYPE_CONFIG) as [EventType, typeof EVENT_TYPE_CONFIG.regular][]).map(
+              ([key, cfg]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setEventType(key)}
+                  className={`rounded-lg border-2 px-3 py-2 text-sm font-bold transition ${
+                    eventType === key
+                      ? `${cfg.bg} ${cfg.text} border-current`
+                      : "border-[#e5e7e5] text-[#68746d]"
+                  }`}
+                >
+                  <span className={`mr-1.5 inline-block size-2.5 rounded-full ${cfg.dot}`} />
+                  {cfg.label}
+                </button>
+              ),
+            )}
+          </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="label">
               開始日時
@@ -373,13 +680,20 @@ export default function EventsPage() {
         </p>
       )}
 
-      {/* ── Tabs: ローカル / Google ── */}
+      {/* ── View tabs: カレンダー / リスト / Google ── */}
       <div className="mt-6 flex gap-1 rounded-xl bg-[#f1f3f1] p-1">
         <button
-          className={`flex-1 rounded-lg px-3 py-2 text-sm font-black transition ${tab === "local" ? "bg-white shadow-sm" : "text-[#68746d]"}`}
-          onClick={() => setTab("local")}
+          className={`flex-1 rounded-lg px-3 py-2 text-sm font-black transition ${view === "calendar" ? "bg-white shadow-sm" : "text-[#68746d]"}`}
+          onClick={() => setView("calendar")}
         >
-          登録済みイベント
+          <CalendarDays size={14} className="mr-1 inline" />
+          カレンダー
+        </button>
+        <button
+          className={`flex-1 rounded-lg px-3 py-2 text-sm font-black transition ${view === "list" ? "bg-white shadow-sm" : "text-[#68746d]"}`}
+          onClick={() => setView("list")}
+        >
+          リスト
           {localEvents.length > 0 && (
             <span className="ml-1.5 text-xs font-normal text-[#68746d]">
               {localEvents.length}
@@ -387,8 +701,8 @@ export default function EventsPage() {
           )}
         </button>
         <button
-          className={`flex-1 rounded-lg px-3 py-2 text-sm font-black transition ${tab === "google" ? "bg-white shadow-sm" : "text-[#68746d]"}`}
-          onClick={() => setTab("google")}
+          className={`flex-1 rounded-lg px-3 py-2 text-sm font-black transition ${view === "google" ? "bg-white shadow-sm" : "text-[#68746d]"}`}
+          onClick={() => setView("google")}
           disabled={!data.calendarConnected}
           title={
             !data.calendarConnected
@@ -397,7 +711,7 @@ export default function EventsPage() {
           }
         >
           <Cloud size={14} className="mr-1 inline" />
-          Googleカレンダー
+          Google
           {unimportedGoogleEvents.length > 0 && (
             <span className="ml-1.5 text-xs font-normal text-[#68746d]">
               {unimportedGoogleEvents.length}
@@ -406,8 +720,125 @@ export default function EventsPage() {
         </button>
       </div>
 
-      {/* ── Local events tab ── */}
-      {tab === "local" && (
+      {/* ── Calendar view ── */}
+      {view === "calendar" && (
+        <div className="mt-4">
+          {/* Month header */}
+          <div className="mb-4 flex items-center justify-between">
+            <button
+              onClick={prevMonth}
+              className="rounded-lg p-2 hover:bg-[#f1f3f1]"
+            >
+              <ChevronLeft size={20} />
+            </button>
+            <div className="text-center">
+              <h2 className="text-xl font-black">
+                {MONTH_NAMES[calMonth]} &apos;{String(calYear).slice(2)}
+              </h2>
+              <p className="text-xs text-[#68746d]">
+                {calYear}年{calMonth + 1}月 スケジュール
+              </p>
+            </div>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={goToday}
+                className="rounded-lg px-2 py-1 text-xs font-bold text-[#176b45] hover:bg-[#e2f2e8]"
+              >
+                今日
+              </button>
+              <button
+                onClick={nextMonth}
+                className="rounded-lg p-2 hover:bg-[#f1f3f1]"
+              >
+                <ChevronRight size={20} />
+              </button>
+            </div>
+          </div>
+
+          {/* Legend */}
+          <div className="mb-3 flex flex-wrap gap-3 text-xs font-bold">
+            {(Object.entries(EVENT_TYPE_CONFIG) as [EventType, typeof EVENT_TYPE_CONFIG.regular][]).map(
+              ([key, cfg]) => (
+                <span key={key} className="flex items-center gap-1.5">
+                  <span className={`size-3 rounded-sm ${cfg.dot}`} />
+                  {cfg.label}
+                </span>
+              ),
+            )}
+          </div>
+
+          {/* Weekday header */}
+          <div className="grid grid-cols-7 border-b border-[#e5e7e5]">
+            {WEEKDAYS.map((w, i) => (
+              <div
+                key={w}
+                className={`py-2 text-center text-xs font-black ${
+                  i === 0
+                    ? "text-[#dc3545]"
+                    : i === 6
+                      ? "text-[#007bff]"
+                      : "text-[#68746d]"
+                }`}
+              >
+                {w}
+              </div>
+            ))}
+          </div>
+
+          {/* Calendar grid */}
+          <div className="grid grid-cols-7 border-l border-[#e5e7e5]">
+            {calendarDays.map((cell, idx) => {
+              const cellDate = new Date(cell.year, cell.month, cell.day);
+              const isToday = isSameDay(cellDate, today);
+              const key = `${cell.year}-${cell.month}-${cell.day}`;
+              const dayEvents = eventsByDate.get(key) ?? [];
+              const dayOfWeek = idx % 7;
+
+              return (
+                <div
+                  key={idx}
+                  className={`min-h-[80px] border-b border-r border-[#e5e7e5] p-1 sm:min-h-[100px] ${
+                    !cell.isCurrentMonth ? "bg-[#fafafa]" : ""
+                  }`}
+                >
+                  <div
+                    className={`mb-0.5 text-right text-xs font-bold ${
+                      !cell.isCurrentMonth
+                        ? "text-[#ccc]"
+                        : isToday
+                          ? "inline-flex size-6 items-center justify-center rounded-full bg-[#176b45] text-white ml-auto"
+                          : dayOfWeek === 0
+                            ? "text-[#dc3545]"
+                            : dayOfWeek === 6
+                              ? "text-[#007bff]"
+                              : "text-[#333]"
+                    }`}
+                  >
+                    {cell.day}
+                  </div>
+                  <div className="flex flex-col gap-0.5">
+                    {dayEvents.slice(0, 3).map((ev) => (
+                      <CalendarEventChip
+                        key={ev.id}
+                        event={ev}
+                        onClick={() => setSelectedEvent(ev)}
+                      />
+                    ))}
+                    {dayEvents.length > 3 && (
+                      <span className="text-center text-[9px] font-bold text-[#68746d]">
+                        +{dayEvents.length - 3}件
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── List view (local events) ── */}
+      {view === "list" && (
         <div className="mt-4 grid gap-4">
           {!localEvents.length ? (
             <EmptyState>
@@ -420,15 +851,19 @@ export default function EventsPage() {
             localEvents.map((e) => {
               const c = counts(e);
               const selected = data.selectedEventId === e.id;
+              const cfg = EVENT_TYPE_CONFIG[e.event_type];
               return (
                 <article className="card p-5" key={e.id}>
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex gap-3">
-                      <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-[#e2f2e8] text-[#176b45]">
+                      <span className={`grid size-11 shrink-0 place-items-center rounded-xl ${cfg.bg} ${cfg.text}`}>
                         <CalendarDays />
                       </span>
                       <div>
                         <div className="flex flex-wrap items-center gap-2">
+                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-black ${cfg.bg} ${cfg.text}`}>
+                            {cfg.label}
+                          </span>
                           {selected && (
                             <span className="rounded-full bg-[#176b45] px-2 py-0.5 text-[10px] font-black text-white">
                               現在のイベント
@@ -521,7 +956,7 @@ export default function EventsPage() {
       )}
 
       {/* ── Google Calendar events tab ── */}
-      {tab === "google" && (
+      {view === "google" && (
         <div className="mt-4 grid gap-4">
           {!data.calendarConnected ? (
             <EmptyState>
@@ -597,6 +1032,17 @@ export default function EventsPage() {
             </>
           )}
         </div>
+      )}
+
+      {/* ── Event detail modal ── */}
+      {selectedEvent && (
+        <EventDetailModal
+          event={selectedEvent}
+          isSelected={data.selectedEventId === selectedEvent.id}
+          onClose={() => setSelectedEvent(null)}
+          onSelect={selectLocal}
+          busy={busy}
+        />
       )}
     </div>
   );
