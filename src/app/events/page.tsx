@@ -40,7 +40,7 @@ type LocalEvent = {
   calendar_sync_status: "local" | "pending" | "synced" | "failed";
   calendar_error: string | null;
   all_day: boolean;
-  event_type: EventType;
+  event_type?: EventType;
   event_contacts: Array<{ contact: { classification: string } | null }>;
 };
 
@@ -211,7 +211,7 @@ function EventDetailModal({
   onSelect: (id: string) => void;
   busy: boolean;
 }) {
-  const cfg = EVENT_TYPE_CONFIG[event.event_type];
+  const cfg = EVENT_TYPE_CONFIG[event.event_type ?? "regular"];
   const contactCount = event.event_contacts.length;
   return (
     <div
@@ -295,7 +295,7 @@ function CalendarEventChip({
   event: LocalEvent;
   onClick: () => void;
 }) {
-  const cfg = EVENT_TYPE_CONFIG[event.event_type];
+  const cfg = EVENT_TYPE_CONFIG[event.event_type ?? "regular"];
   return (
     <button
       onClick={onClick}
@@ -851,7 +851,7 @@ export default function EventsPage() {
             localEvents.map((e) => {
               const c = counts(e);
               const selected = data.selectedEventId === e.id;
-              const cfg = EVENT_TYPE_CONFIG[e.event_type];
+              const cfg = EVENT_TYPE_CONFIG[e.event_type ?? "regular"];
               return (
                 <article className="card p-5" key={e.id}>
                   <div className="flex items-start justify-between gap-3">

@@ -19,7 +19,7 @@ const postSchema=z.discriminatedUnion("action",[
   z.object({action:z.literal("create"),name:z.string().trim().min(1).max(200),startsAt:z.string().datetime(),endsAt:z.string().datetime(),location:z.string().max(300),description:z.string().max(5000),makeCurrent:z.boolean(),eventType:eventTypeSchema}),
   z.object({action:z.literal("select"),localEventId:z.string().uuid().optional(),googleEvent:googleEventSchema.optional()}).refine(value=>Boolean(value.localEventId)!==Boolean(value.googleEvent),"Select exactly one event"),
 ]);
-const eventSelect="id,name,description,starts_at,ends_at,location,is_current,google_calendar_event_id,google_html_link,calendar_source,calendar_sync_status,calendar_error,all_day,event_type,event_contacts(contact:contacts(classification))";
+const eventSelect="id,name,description,starts_at,ends_at,location,is_current,google_calendar_event_id,google_html_link,calendar_source,calendar_sync_status,calendar_error,all_day,event_contacts(contact:contacts(classification))";
 
 export async function GET(request:Request){
   try{
@@ -64,7 +64,7 @@ export async function POST(request:Request){
     const scope="https://www.googleapis.com/auth/calendar.events.owned";
     if(!connection.data||connection.data.status!=="active")return Response.json({error:"organization_google_not_connected",message:"設定画面で組織Googleアカウントを接続してください。"},{status:409});
     if(!(connection.data.scopes??[]).includes(scope))return Response.json({error:"calendar_scope_required",message:"カレンダー権限を追加するため、組織Googleアカウントを再接続してください。"},{status:409});
-    const inserted=await supabase.from("events").insert({club_id:member.club_id,name:input.name,description:input.description,starts_at:input.startsAt,ends_at:input.endsAt,location:input.location,is_current:false,created_by:member.id,calendar_source:"app",calendar_sync_status:"pending",event_type:input.eventType}).select("id").single();if(inserted.error)throw inserted.error;
+    const inserted=await supabase.from("events").insert({club_id:member.club_id,name:input.name,description:input.description,starts_at:input.startsAt,ends_at:input.endsAt,location:input.location,is_current:false,created_by:member.id,calendar_source:"app",calendar_sync_status:"pending"}).select("id").single();if(inserted.error)throw inserted.error;
     try{
       const created=await createOrganizationCalendarEvent({refreshToken:decryptGoogleToken(connection.data.encrypted_refresh_token),summary:input.name,description:`${input.description}${input.description?"\n\n":""}つながり帳から登録`,location:input.location,start:input.startsAt,end:input.endsAt});
       const updated=await supabase.from("events").update({google_calendar_event_id:created.data.id,google_html_link:created.data.htmlLink,google_updated_at:created.data.updated,calendar_sync_status:"synced",calendar_error:null}).eq("club_id",member.club_id).eq("id",inserted.data.id);if(updated.error)throw updated.error;
