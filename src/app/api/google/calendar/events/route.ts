@@ -30,7 +30,7 @@ export async function GET(request:Request){
       supabase.from("events").select(eventSelect).eq("club_id",member.club_id).gte("starts_at",timeMin).lte("starts_at",timeMax).order("starts_at"),
       supabase.from("organization_google_connections").select("google_email,encrypted_refresh_token,status,scopes").eq("club_id",member.club_id).maybeSingle(),
     ]);
-    if(localResult.error)throw localResult.error;if(connectionResult.error)throw connectionResult.error;
+    if(localResult.error){console.error("events query error:",JSON.stringify(localResult.error));throw localResult.error}if(connectionResult.error){console.error("connection query error:",JSON.stringify(connectionResult.error));throw connectionResult.error}
     const connection=connectionResult.data,scope="https://www.googleapis.com/auth/calendar.events.owned";
     const base={localEvents:localResult.data??[],selectedEventId:member.selected_event_id,canManage:member.access_role==="owner"||member.access_role==="admin",calendarConnected:Boolean(connection?.status==="active"),calendarEmail:connection?.google_email??null,reconnectRequired:Boolean(connection&&!(connection.scopes??[]).includes(scope))};
     if(!connection||connection.status!=="active"||!(connection.scopes??[]).includes(scope))return Response.json({...base,googleEvents:[]},{headers:{"Cache-Control":"no-store"}});
