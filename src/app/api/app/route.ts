@@ -80,7 +80,7 @@ export async function GET(request: Request) {
         supabase.from("devices").select("id,device_id_hash,label,last_seen_at,revoked_at,selected_event_id").eq("club_id", member.club_id).eq("member_id", member.id),
         supabase.from("email_templates").select("id,name,default_subject,default_body,is_default,is_active").eq("club_id", member.club_id).eq("is_active",true).order("name"),
         supabase.from("integration_jobs").select("operation,status,last_error,updated_at").eq("club_id", member.club_id).order("updated_at", { ascending: false }).limit(20),
-        supabase.from("clubs").select("id,name").eq("id",member.club_id).single(),
+        supabase.from("clubs").select("id,name,invite_code").eq("id",member.club_id).single(),
         supabase.from("organization_mail_settings").select("admin_sender_mode,member_sender_mode,auto_cc_organization_email,allow_member_to_disable_cc").eq("club_id",member.club_id).single(),
         manager?supabase.from("members").select("id,name,role,access_role,is_active,created_at").eq("club_id",member.club_id).order("created_at"):Promise.resolve({data:[],error:null}),
         manager?supabase.from("organization_google_connections").select("google_email,status,connected_at").eq("club_id",member.club_id).maybeSingle():Promise.resolve({data:null,error:null}),
