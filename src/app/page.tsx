@@ -60,8 +60,8 @@ export default function Home() {
               <Camera size={28} />
             </span>
             <span>
-              <strong className="block text-2xl font-black">名刺を撮影</strong>
-              <span className="text-sm opacity-80">撮って保存、3秒で完了</span>
+              <strong className="block text-2xl font-black">保存のみ</strong>
+              <span className="text-sm opacity-80">撮って保存するだけ（メールなし）</span>
             </span>
           </div>
           <ArrowRight className="opacity-60 transition-transform group-hover:translate-x-1" />
@@ -107,8 +107,8 @@ export default function Home() {
       {/* Classification cards — only 2 */}
       <section>
         <div className="mb-3">
-          <p className="eyebrow">分類して登録</p>
-          <h2 className="text-lg font-black">じっくり登録する</h2>
+          <p className="eyebrow">撮影＋メール</p>
+          <h2 className="text-lg font-black">撮影してメールも送る</h2>
         </div>
         <div className="grid gap-3 sm:grid-cols-2">
           <Link
@@ -120,8 +120,8 @@ export default function Home() {
                 <BriefcaseBusiness size={25} />
               </span>
               <span>
-                <strong className="block text-2xl font-black">重要</strong>
-                <span className="text-sm opacity-80">関係構築・個別対応</span>
+                <strong className="block text-2xl font-black">保存＋下書き作成</strong>
+                <span className="text-sm opacity-80">撮って保存＋メール下書きを作成</span>
               </span>
             </div>
             <ArrowRight className="opacity-40" />
@@ -135,8 +135,8 @@ export default function Home() {
                 <CheckCircle2 size={25} />
               </span>
               <span>
-                <strong className="block text-2xl font-black">礼儀</strong>
-                <span className="text-sm opacity-80">編集してお礼メール</span>
+                <strong className="block text-2xl font-black">保存＋お礼送信</strong>
+                <span className="text-sm opacity-80">撮って保存＋お礼メールを自動送信</span>
               </span>
             </div>
             <ArrowRight className="opacity-40" />
