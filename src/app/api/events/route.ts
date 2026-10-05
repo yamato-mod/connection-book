@@ -19,6 +19,10 @@ const postSchema = z.discriminatedUnion("action", [
     action: z.literal("select"),
     localEventId: z.string().uuid(),
   }),
+  z.object({
+    action: z.literal("delete"),
+    eventId: z.string().uuid(),
+  }),
 ]);
 
 const eventSelect =
@@ -82,6 +86,42 @@ export async function POST(request: Request) {
       });
 
       return Response.json({ ok: true, id: input.localEventId });
+    }
+
+    if (input.action === "delete") {
+      requireOrganizationManager(member);
+
+      // Clear selected_event_id for any member who had this event selected
+      await supabase
+        .from("members")
+        .update({ selected_event_id: null, updated_at: new Date().toISOString() })
+        .eq("club_id", member.club_id)
+        .eq("selected_event_id", input.eventId);
+
+      // Delete related event_contacts first
+      await supabase
+        .from("event_contacts")
+        .delete()
+        .eq("club_id", member.club_id)
+        .eq("event_id", input.eventId);
+
+      // Delete the event
+      const deleted = await supabase
+        .from("events")
+        .delete()
+        .eq("club_id", member.club_id)
+        .eq("id", input.eventId);
+      if (deleted.error) throw deleted.error;
+
+      await supabase.from("audit_logs").insert({
+        club_id: member.club_id,
+        actor_member_id: member.id,
+        action: "event_deleted",
+        entity_type: "event",
+        entity_id: input.eventId,
+      });
+
+      return Response.json({ ok: true });
     }
 
     // action === "create"

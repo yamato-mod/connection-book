@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Clock,
   MapPin,
+  Trash2,
   Users,
   X,
 } from "lucide-react";
@@ -130,14 +131,18 @@ function formatRange(start: string, end: string | null, allDay: boolean) {
 function EventDetailModal({
   event,
   isSelected,
+  canManage,
   onClose,
   onSelect,
+  onDelete,
   busy,
 }: {
   event: LocalEvent;
   isSelected: boolean;
+  canManage: boolean;
   onClose: () => void;
   onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
   busy: boolean;
 }) {
   const cfg = EVENT_TYPE_CONFIG[event.event_type ?? "regular"];
@@ -198,6 +203,19 @@ function EventDetailModal({
               現在のイベントにする
             </button>
           )}
+          {canManage && (
+            <button
+              className="rounded-xl border border-[#dfaaa5] px-3 py-2 text-sm font-bold text-[#a93830] transition hover:bg-[#fff0ee]"
+              disabled={busy}
+              onClick={() => {
+                if (confirm("このイベントを削除しますか？関連する名刺交換記録も削除されます。"))
+                  onDelete(event.id);
+              }}
+            >
+              <Trash2 size={14} className="inline mr-1" />
+              削除
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -215,7 +233,7 @@ function CalendarEventChip({
   const cfg = EVENT_TYPE_CONFIG[event.event_type ?? "regular"];
   return (
     <button
-      onClick={onClick}
+      onClick={(e) => { e.stopPropagation(); onClick(); }}
       className={`w-full rounded-md px-1.5 py-0.5 text-left text-[10px] leading-tight transition hover:opacity-80 ${cfg.bg} ${cfg.text}`}
     >
       <span className="font-bold line-clamp-1">{event.name}</span>
@@ -378,6 +396,39 @@ export default function EventsPage() {
     } finally {
       setBusy(false);
     }
+  }
+
+  /* ── Delete an event ── */
+  async function deleteEvent(id: string) {
+    setBusy(true);
+    setError("");
+    try {
+      await appFetch("/api/events", {
+        method: "POST",
+        body: JSON.stringify({ action: "delete", eventId: id }),
+      });
+      setSelectedEvent(null);
+      await state.reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "削除できませんでした。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /* ── Open create form pre-filled with a date ── */
+  function openCreateForDate(year: number, month: number, day: number) {
+    if (!data?.canManage) return;
+    const d = new Date(year, month, day, 10, 0);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const localStr = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    setStart(localStr);
+    const e = new Date(d.getTime() + 2 * 3600_000);
+    const endStr = `${e.getFullYear()}-${pad(e.getMonth() + 1)}-${pad(e.getDate())}T${pad(e.getHours())}:${pad(e.getMinutes())}`;
+    setEnd(endStr);
+    setOpen(true);
+    // scroll to top so form is visible
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   if (state.loading) return <LoadingState />;
@@ -611,9 +662,10 @@ export default function EventsPage() {
               return (
                 <div
                   key={idx}
-                  className={`min-h-[80px] border-b border-r border-[#e5e7e5] p-1 sm:min-h-[100px] ${
+                  className={`min-h-[80px] border-b border-r border-[#e5e7e5] p-1 sm:min-h-[100px] cursor-pointer transition hover:bg-[#f5faf7] ${
                     !cell.isCurrentMonth ? "bg-[#fafafa]" : ""
                   }`}
+                  onClick={() => openCreateForDate(cell.year, cell.month, cell.day)}
                 >
                   <div
                     className={`mb-0.5 text-right text-xs font-bold ${
@@ -704,6 +756,19 @@ export default function EventsPage() {
                           現在のイベントにする
                         </button>
                       )}
+                      {data.canManage && (
+                        <button
+                          className="rounded-lg border border-[#dfaaa5] px-2 py-1 text-xs font-bold text-[#a93830] transition hover:bg-[#fff0ee]"
+                          disabled={busy}
+                          onClick={() => {
+                            if (confirm("このイベントを削除しますか？関連する名刺交換記録も削除されます。"))
+                              deleteEvent(e.id);
+                          }}
+                        >
+                          <Trash2 size={12} className="inline mr-1" />
+                          削除
+                        </button>
+                      )}
                     </div>
                   </div>
                   {/* Stats row */}
@@ -746,8 +811,10 @@ export default function EventsPage() {
         <EventDetailModal
           event={selectedEvent}
           isSelected={data.selectedEventId === selectedEvent.id}
+          canManage={data.canManage}
           onClose={() => setSelectedEvent(null)}
           onSelect={selectLocal}
+          onDelete={deleteEvent}
           busy={busy}
         />
       )}
