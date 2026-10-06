@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { apiError } from "@/lib/api-error";
-import { assertSameOrigin, requireMember, requireOrganizationManager, requireOwner } from "@/lib/server-auth";
+import { asAccessRole, assertSameOrigin, requireMember, requireOrganizationManager, requireOwner } from "@/lib/server-auth";
+import { resolveSender, type MailSettings } from "@/lib/organization-mail";
+import { googleDrive } from "@/lib/google";
 import { isConfiguredValue } from "@/lib/env-config";
 
 const mutationSchema = z.discriminatedUnion("action", [
@@ -15,6 +17,7 @@ const mutationSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("update_contact"), id: z.string().uuid(), name: z.string().trim().min(1).max(120), company: z.string().max(200), role: z.string().max(120), email: z.string().email(), phone: z.string().max(40), address: z.string().max(400), website: z.union([z.literal(""), z.string().url()]), classification: z.enum(["important","courtesy","undecided","no_contact"]) }),
   z.object({ action: z.literal("save_template"), id: z.string().uuid().optional(), name: z.string().trim().min(1).max(120), subject: z.string().trim().min(1).max(180), body: z.string().trim().min(1).max(20000), isDefault: z.boolean() }),
   z.object({ action:z.literal("delete_template"),id:z.string().uuid()}),
+  z.object({ action:z.literal("delete_contact"),id:z.string().uuid()}),
   z.object({ action:z.literal("create_tag"),name:z.string().trim().min(1).max(80),color:z.string().regex(/^#[0-9a-fA-F]{6}$/)}),
   z.object({ action:z.literal("set_contact_tags"),contactId:z.string().uuid(),tagIds:z.array(z.string().uuid()).max(30)}),
   z.object({action:z.literal("update_organization"),name:z.string().trim().min(1).max(160)}),
@@ -48,7 +51,7 @@ export async function GET(request: Request) {
     if (view === "contacts") {
       const search = (url.searchParams.get("q") ?? "").trim().toLocaleLowerCase("ja-JP");
       const result = await supabase.from("contacts").select("id,name,company_name,university_name,organization_name,role,email,phone,classification,last_contact_at,owner:members!contacts_owner_member_id_fkey(name),contact_tags(tags(name,color)),event_contacts(event:events(name,starts_at))").eq("club_id", member.club_id).order("last_contact_at", { ascending: false }).limit(500);
-      throwFirst(result);const contacts=search?(result.data??[]).filter(row=>JSON.stringify(row).toLocaleLowerCase("ja-JP").includes(search)):(result.data??[]);return Response.json({ contacts:contacts.slice(0,100) });
+      throwFirst(result);const contacts=search?(result.data??[]).filter(row=>JSON.stringify(row).toLocaleLowerCase("ja-JP").includes(search)):(result.data??[]);return Response.json({ contacts:contacts.slice(0,100), canManage:member.access_role!=="member" });
     }
     if (view === "contact") {
       const id = z.string().uuid().parse(url.searchParams.get("id"));
@@ -64,7 +67,7 @@ export async function GET(request: Request) {
         supabase.from("business_cards").select("id,drive_status,drive_error,image_name,image_mime_type,image_google_file_id").eq("club_id",member.club_id).eq("contact_id",id).order("captured_at",{ascending:false}),
       ]);
       throwFirst(contact, notes, followups, emails, cards, events,tags,businessCards);
-      return Response.json({ contact: contact.data, notes: notes.data ?? [], followups: followups.data ?? [], emails: emails.data ?? [], files: cards.data ?? [], events: events.data ?? [],tags:tags.data??[],businessCards:businessCards.data??[] });
+      return Response.json({ canManage:member.access_role!=="member", contact: contact.data, notes: notes.data ?? [], followups: followups.data ?? [], emails: emails.data ?? [], files: cards.data ?? [], events: events.data ?? [],tags:tags.data??[],businessCards:businessCards.data??[] });
     }
     if (view === "events") {
       const result = await supabase.from("events").select("id,name,starts_at,ends_at,location,is_current,event_contacts(contact:contacts(classification)),email_logs(id)").eq("club_id", member.club_id).order("starts_at", { ascending: false });
@@ -83,13 +86,15 @@ export async function GET(request: Request) {
         supabase.from("clubs").select("id,name,invite_code").eq("id",member.club_id).single(),
         supabase.from("organization_mail_settings").select("admin_sender_mode,member_sender_mode,auto_cc_organization_email,allow_member_to_disable_cc").eq("club_id",member.club_id).single(),
         manager?supabase.from("members").select("id,name,role,access_role,is_active,created_at").eq("club_id",member.club_id).order("created_at"):Promise.resolve({data:[],error:null}),
-        manager?supabase.from("organization_google_connections").select("google_email,status,connected_at").eq("club_id",member.club_id).maybeSingle():Promise.resolve({data:null,error:null}),
+        // Every member needs the organization sender status (members may send from it or be auto-CC'd). Never select the token here.
+        supabase.from("organization_google_connections").select("google_email,status,connected_at").eq("club_id",member.club_id).maybeSingle(),
         supabase.from("user_google_connections").select("google_email,status,connected_at").eq("club_id",member.club_id).eq("member_id",member.id).maybeSingle(),
       ]);
       throwFirst(devices, templates, jobs,club,mailSettings,members,organizationGoogle,userGoogle);
       const legacyGoogleConfigured = [process.env.GOOGLE_CLIENT_ID,process.env.GOOGLE_CLIENT_SECRET,process.env.GOOGLE_REFRESH_TOKEN,process.env.GOOGLE_SHARED_GMAIL].every(isConfiguredValue);
       const oauthClientConfigured=[process.env.GOOGLE_CLIENT_ID,process.env.GOOGLE_CLIENT_SECRET,process.env.GOOGLE_REDIRECT_URI,process.env.GOOGLE_TOKEN_ENCRYPTION_KEY,process.env.GOOGLE_OAUTH_STATE_SECRET].every(isConfiguredValue);
-      return Response.json({ member,organization:club.data,mailSettings:mailSettings.data,members:members.data??[],organizationGoogle:organizationGoogle.data,userGoogle:userGoogle.data,oauthClientConfigured,devices: devices.data ?? [], templates: templates.data ?? [], jobs: jobs.data ?? [], integrations: { gmail: Boolean(organizationGoogle.data||userGoogle.data), drive: legacyGoogleConfigured, people: legacyGoogleConfigured, calendar: legacyGoogleConfigured } });
+      const sender=resolveSender({role:asAccessRole(member.access_role),settings:mailSettings.data as MailSettings,organizationGoogle:organizationGoogle.data,userGoogle:userGoogle.data});
+      return Response.json({ member,sender,organization:club.data,mailSettings:mailSettings.data,members:members.data??[],organizationGoogle:organizationGoogle.data,userGoogle:userGoogle.data,oauthClientConfigured,devices: devices.data ?? [], templates: templates.data ?? [], jobs: jobs.data ?? [], integrations: { gmail: Boolean(organizationGoogle.data||userGoogle.data), drive: legacyGoogleConfigured, people: legacyGoogleConfigured, calendar: legacyGoogleConfigured } });
     }
     return Response.json({ error: "unknown_view" }, { status: 404 });
   } catch (error) { return apiError(error); }
@@ -127,6 +132,19 @@ export async function POST(request: Request) {
       const result = await supabase.from("followups").insert({ club_id: member.club_id, contact_id: input.contactId, assigned_member_id: member.id, due_at: input.dueAt, content: input.content }).select("id").single(); throwFirst(result);await audit(supabase,member,"followup_created","followup",result.data!.id);return Response.json({ ok: true, id: result.data!.id });
     } else if (input.action === "add_note") {
       const result = await supabase.from("notes").insert({ club_id: member.club_id, contact_id: input.contactId, author_member_id: member.id, body: input.body }).select("id").single(); throwFirst(result);await audit(supabase,member,"note_added","note",result.data!.id);return Response.json({ ok: true, id: result.data!.id });
+    } else if (input.action === "delete_contact") {
+      requireOrganizationManager(member);
+      const removed = await supabase.rpc("delete_contact", { p_club_id: member.club_id, p_member_id: member.id, p_contact_id: input.id });
+      if (removed.error?.code === "P0002") return Response.json({ error: "not_found", message: "この名刺は既に削除されています。" }, { status: 404 });
+      throwFirst(removed);
+      // Card images in Drive go to the Drive trash (recoverable for 30 days). Best effort: the CRM record is already gone.
+      const fileIds = (removed.data as string[] | null) ?? [];
+      let driveTrashFailed = 0;
+      if (fileIds.length) {
+        try { const drive = googleDrive(); const results = await Promise.allSettled(fileIds.map((fileId) => drive.files.update({ fileId, requestBody: { trashed: true }, supportsAllDrives: true }))); driveTrashFailed = results.filter((r) => r.status === "rejected").length; }
+        catch { driveTrashFailed = fileIds.length; }
+      }
+      return Response.json({ ok: true, driveFiles: fileIds.length, driveTrashFailed });
     } else if (input.action === "update_contact") {
       requireOrganizationManager(member);
       const result = await supabase.from("contacts").update({ name: input.name, company_name: input.company, role: input.role, email: input.email, phone: input.phone, phone_normalized: input.phone.replace(/\D/g, ""), address: input.address, website: input.website, classification: input.classification, updated_at: new Date().toISOString() }).eq("club_id", member.club_id).eq("id", input.id); throwFirst(result);

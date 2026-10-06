@@ -3,10 +3,11 @@ import { verifyConfirmationToken } from "@/lib/confirmation-token";
 import { sendGmail } from "@/lib/google";
 import { decryptGoogleToken } from "@/lib/google-token-crypto";
 import { asAccessRole, assertSameOrigin, requireMember } from "@/lib/server-auth";
-import { enforcedCc, senderModeForRole, type MailSettings } from "@/lib/organization-mail";
+import { enforcedCc, isGoogleReauthError, resolveSender, type MailSettings } from "@/lib/organization-mail";
 
 export async function POST(request:Request){
   let logContext:{id:string;supabase:Awaited<ReturnType<typeof requireMember>>["supabase"]}|null=null;
+  let selectedConnection:{table:"organization_google_connections"|"user_google_connections";clubId:string;memberId:string;supabase:Awaited<ReturnType<typeof requireMember>>["supabase"]}|null=null;
   let requestContext:{key:string;supabase:Awaited<ReturnType<typeof requireMember>>["supabase"]}|null=null;
   try{
     assertSameOrigin(request);const {user,member,supabase}=await requireMember(request);const parsed=mailSchema.safeParse(await request.json());
@@ -21,9 +22,11 @@ export async function POST(request:Request){
       supabase.from("user_google_connections").select("google_email,encrypted_refresh_token,status").eq("club_id",member.club_id).eq("member_id",member.id).maybeSingle(),
     ]);
     if(settingsResult.error)throw settingsResult.error;
-    const settings=settingsResult.data as MailSettings,role=asAccessRole(member.access_role),senderMode=senderModeForRole(role,settings);
+    const settings=settingsResult.data as MailSettings,role=asAccessRole(member.access_role);
+    const sender=resolveSender({role,settings,organizationGoogle:organizationConnection.data,userGoogle:userConnection.data}),senderMode=sender.mode;
     const selected=senderMode==="organization_email"?organizationConnection.data:userConnection.data;
-    if(!selected||selected.status!=="active")return Response.json({error:senderMode==="organization_email"?"organization_google_not_connected":"user_google_not_connected"},{status:409});
+    if(sender.state!=="ready"||!selected){const prefix=senderMode==="organization_email"?"organization":"user";return Response.json({error:sender.state==="needs_reconnect"?`${prefix}_google_reauth_required`:`${prefix}_google_not_connected`,sender},{status:409});}
+    selectedConnection={table:senderMode==="organization_email"?"organization_google_connections":"user_google_connections",clubId:member.club_id,memberId:member.id,supabase};
     const cc=enforcedCc({role,settings,organizationEmail:organizationConnection.data?.google_email??null,requestedCc:input.cc,disableOrganizationCc:input.disableOrganizationCc});
 
     const {error:claimError}=await supabase.from("email_send_requests").insert({club_id:member.club_id,contact_id:input.contactId,requested_by:member.id,idempotency_key:input.idempotencyKey,status:"processing"});
@@ -44,6 +47,14 @@ export async function POST(request:Request){
     const message=(error instanceof Error?error.message:"send failed").slice(0,1000),completedAt=new Date().toISOString();
     if(logContext)await logContext.supabase.from("email_logs").update({status:"failed",error_message:message}).eq("id",logContext.id);
     if(requestContext)await requestContext.supabase.from("email_send_requests").update({status:"failed",completed_at:completedAt}).eq("idempotency_key",requestContext.key);
-    if(error instanceof Response)return error;console.error("gmail send failed",error);return Response.json({error:"send_failed"},{status:502});
+    if(error instanceof Response)return error;
+    if(selectedConnection&&isGoogleReauthError(error)){
+      // The stored refresh token no longer works (revoked / password changed / removed access). Mark it so every screen shows "要再接続" instead of a stale "接続済み".
+      const q=selectedConnection.supabase.from(selectedConnection.table).update({status:"revoked",updated_at:completedAt}).eq("club_id",selectedConnection.clubId);
+      await (selectedConnection.table==="user_google_connections"?q.eq("member_id",selectedConnection.memberId):q);
+      const prefix=selectedConnection.table==="organization_google_connections"?"organization":"user";
+      return Response.json({error:`${prefix}_google_reauth_required`},{status:409});
+    }
+    console.error("gmail send failed",error);return Response.json({error:"send_failed"},{status:502});
   }
 }

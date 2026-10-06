@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { exchangeGoogleAuthorizationCode } from "@/lib/google";
+import { exchangeGoogleAuthorizationCode, GMAIL_SEND_SCOPE } from "@/lib/google";
 import { verifyGoogleOAuthState } from "@/lib/google-oauth-state";
 import { encryptGoogleToken } from "@/lib/google-token-crypto";
 
@@ -17,7 +17,10 @@ export async function GET(request:Request){
     const {data:member}=await supabase.from("members").select("id,club_id,access_role,is_active").eq("id",state.memberId).eq("club_id",state.clubId).single();
     if(!member?.is_active)return redirect("forbidden");
     if(state.type==="organization"&&member.access_role!=="owner"&&member.access_role!=="admin")return redirect("forbidden");
-    const connection=await exchangeGoogleAuthorizationCode(code),encrypted=encryptGoogleToken(connection.refreshToken),now=new Date().toISOString();
+    const connection=await exchangeGoogleAuthorizationCode(code);
+    // Google's consent screen lets users untick individual permissions. Without Gmail permission the account looks "connected" but can never send.
+    if(!connection.scopes.includes(GMAIL_SEND_SCOPE))return redirect("missing_scope");
+    const encrypted=encryptGoogleToken(connection.refreshToken),now=new Date().toISOString();
     if(state.type==="organization"){
       const result=await supabase.from("organization_google_connections").upsert({club_id:state.clubId,google_email:connection.email,encrypted_refresh_token:encrypted,token_expires_at:connection.expiresAt,scopes:connection.scopes,connected_by_member_id:member.id,connected_at:now,status:"active",updated_at:now},{onConflict:"club_id"});
       if(result.error)throw result.error;

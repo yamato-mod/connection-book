@@ -47,19 +47,24 @@ export const mailSchema = z.object({
   if (value.duplicateOverride && !value.duplicateOverrideReason?.trim()) ctx.addIssue({ code: "custom", path: ["duplicateOverrideReason"], message: "重複警告を無視する理由が必要です" });
 });
 
-export type DuplicateCandidate = { strength: "strong" | "possible"; reason: "email" | "phone" | "name_company"; contactName: string; senderName?: string; sentAt?: string; eventName?: string };
+export type ExistingContactSnapshot = { name: string; company: string; role: string; email: string; phone: string; address: string; website: string };
+export type DuplicateCandidate = { strength: "strong" | "possible"; reason: "email" | "phone" | "name_company"; contactName: string; contactId?: string; existing?: ExistingContactSnapshot; senderName?: string; sentAt?: string; eventName?: string };
+export type MergeMode = "overwrite" | "append";
 
 const digits = (value: string) => value.replace(/\D/g, "");
 const text = (value: string) => value.normalize("NFKC").replace(/\s+/g, "").toLocaleLowerCase("ja-JP");
 
-export function findDuplicates(input: Pick<ContactInput, "email" | "phone" | "name" | "company">, existing: Array<Pick<ContactInput, "email" | "phone" | "name" | "company"> & { senderName?: string; sentAt?: string; eventName?: string }>): DuplicateCandidate[] {
+export function findDuplicates(input: Pick<ContactInput, "email" | "phone" | "name" | "company">, existing: Array<Pick<ContactInput, "email" | "phone" | "name" | "company"> & { id?: string; existing?: ExistingContactSnapshot; senderName?: string; sentAt?: string; eventName?: string }>): DuplicateCandidate[] {
   const matches: DuplicateCandidate[] = [];
   for (const candidate of existing) {
-    if (input.email && candidate.email.toLowerCase() === input.email.toLowerCase()) matches.push({ strength: "strong", reason: "email", contactName: candidate.name, senderName: candidate.senderName, sentAt: candidate.sentAt, eventName: candidate.eventName });
-    else if (digits(input.phone).length >= 7 && digits(candidate.phone) === digits(input.phone)) matches.push({ strength: "possible", reason: "phone", contactName: candidate.name });
-    else if (text(input.name) === text(candidate.name) && text(input.company) === text(candidate.company)) matches.push({ strength: "possible", reason: "name_company", contactName: candidate.name });
+    const ref = { contactName: candidate.name, contactId: candidate.id, existing: candidate.existing };
+    if (input.email && candidate.email && candidate.email.toLowerCase() === input.email.toLowerCase()) matches.push({ strength: "strong", reason: "email", ...ref, senderName: candidate.senderName, sentAt: candidate.sentAt, eventName: candidate.eventName });
+    else if (digits(input.phone).length >= 7 && digits(candidate.phone) === digits(input.phone)) matches.push({ strength: "possible", reason: "phone", ...ref });
+    else if (text(input.name) === text(candidate.name) && text(input.company) === text(candidate.company)) matches.push({ strength: "possible", reason: "name_company", ...ref });
   }
-  return matches;
+  // Strongest match first, one entry per contact.
+  const seen = new Set<string>();
+  return matches.sort((a, b) => (a.strength === b.strength ? 0 : a.strength === "strong" ? -1 : 1)).filter((m) => !m.contactId || (!seen.has(m.contactId) && seen.add(m.contactId)));
 }
 
 export function renderTemplate(template: string, variables: Record<string, string>) {
