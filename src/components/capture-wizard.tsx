@@ -311,7 +311,7 @@ function DuplicateStep(props:DuplicateProps){
   const candidates=props.duplicates.filter(x=>x.contactId&&x.existing);
   const choice=props.mergeChoice;
   const isChosen=(id:string,mode:MergeMode)=>choice!==null&&choice!=="new"&&choice.targetContactId===id&&choice.mode===mode;
-  const option=(checked:boolean,onChange:()=>void,title:string,detail:string)=><label className={`flex cursor-pointer items-start gap-3 rounded-xl border-2 p-3 ${checked?"border-[#176b45] bg-[#eef7f1]":"border-[#dce4de] bg-white"}`}><input type="radio" className="mt-1 size-4 accent-[#176b45]" checked={checked} onChange={onChange}/><span><strong className="block text-sm">{title}</strong><span className="text-xs text-[#5f6b64]">{detail}</span></span></label>;
+  const option=(checked:boolean,onChange:()=>void,title:string,detail:string,disabled=false)=><label className={`flex items-start gap-3 rounded-xl border-2 p-3 ${disabled?"cursor-not-allowed opacity-60":"cursor-pointer"} ${checked?"border-[#176b45] bg-[#eef7f1]":"border-[#dce4de] bg-white"}`}><input type="radio" className="mt-1 size-4 accent-[#176b45]" checked={checked} disabled={disabled} onChange={onChange}/><span><strong className="block text-sm">{title}</strong><span className="text-xs text-[#5f6b64]">{detail}</span></span></label>;
   return <section className="card p-5 md:p-7"><h2 className="text-xl font-black">部全体の履歴を確認</h2>
   {candidates.length?<div className="mt-4 grid gap-4">
     <div className="flex gap-3 rounded-2xl border-2 border-[#dc9b35] bg-[#fff6df] p-4"><AlertTriangle className="shrink-0 text-[#a25c00]"/><div><strong>この人はすでに名刺ライブラリに登録されている可能性があります</strong><p className="mt-1 text-sm">同じ人を二重に登録しないよう、どう保存するか選んでください。</p></div></div>
@@ -320,7 +320,7 @@ function DuplicateStep(props:DuplicateProps){
       {candidate.sentAt&&<p className="mt-1 text-xs text-[#6d7871]">{candidate.senderName?`${candidate.senderName}さんが`:""}{new Intl.DateTimeFormat("ja-JP").format(new Date(candidate.sentAt))}にお礼メールを送信済み{candidate.eventName&&`（${candidate.eventName}）`}</p>}
       <div className="mt-3 overflow-x-auto"><table className="w-full min-w-[420px] text-left text-xs"><thead className="text-[#748078]"><tr><th className="p-1.5">項目</th><th className="p-1.5">登録済み</th><th className="p-1.5">今回の名刺</th></tr></thead><tbody>{fieldLabels.map(([key,label])=>{const before=existing[key]??"",after=props.contact[key]??"";const changed=Boolean(after.trim())&&after.trim()!==before.trim();return <tr key={key} className="border-t"><td className="p-1.5 font-bold">{label}</td><td className="p-1.5 break-all">{before||"—"}</td><td className={`p-1.5 break-all ${changed?"font-bold text-[#a25c00]":""}`}>{after||"—"}</td></tr>})}</tbody></table></div>
       <div className="mt-3 grid gap-2">
-        {option(isChosen(id,"overwrite"),()=>props.setMergeChoice({targetContactId:id,mode:"overwrite"}),"上書き保存","今回の名刺の内容で更新します（空欄の項目は登録済みの値を残します）。")}
+        {option(isChosen(id,"overwrite"),()=>props.setMergeChoice({targetContactId:id,mode:"overwrite"}),"上書き保存",candidate.canOverwrite===false?"上書きできるのは、この名刺を登録した人と管理者だけです。":"今回の名刺の内容で更新します（空欄の項目は登録済みの値を残します）。",candidate.canOverwrite===false)}
         {option(isChosen(id,"append"),()=>props.setMergeChoice({targetContactId:id,mode:"append"}),"併記して保存","登録済みの内容はそのままに、違う部分を「別の名刺の情報」としてメモに残します。")}
       </div></div>})}
     {option(choice==="new",()=>props.setMergeChoice("new"),"別人として新規登録","同姓同名など、登録済みの人とは別人の場合に選びます。")}

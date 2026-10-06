@@ -3,6 +3,7 @@ import { apiError } from "@/lib/api-error";
 import { contactSchema, quickContactSchema } from "@/lib/domain";
 import { createGoogleContact, findGoogleContactByEmail, uploadBusinessCard } from "@/lib/google";
 import { assertSameOrigin, requireMember } from "@/lib/server-auth";
+import { canEditContact } from "@/lib/organization-mail";
 
 // When the card belongs to someone already in the library, the user picks how to combine it (see DuplicateStep).
 const mergeSchema = z.object({ targetContactId: z.string().uuid(), mode: z.enum(["overwrite", "append"]) }).nullable().optional();
@@ -45,6 +46,12 @@ export async function POST(request: Request) {
     if (input.eventId) {
       const event = await supabase.from("events").select("id").eq("club_id", member.club_id).eq("id", input.eventId).single();
       if (event.error) return Response.json({ error: "invalid_event", message: "選択中のイベントを確認してください。" }, { status: 409 });
+    }
+    if (input.merge?.mode === "overwrite") {
+      const target = await supabase.from("contacts").select("created_by").eq("club_id", member.club_id).eq("id", input.merge.targetContactId).maybeSingle();
+      if (target.error) throw target.error;
+      if (!target.data) return Response.json({ error: "merge_target_missing", message: "統合先の名刺が見つかりません（削除された可能性があります）。重複確認からやり直してください。" }, { status: 409 });
+      if (!canEditContact(member, target.data)) return Response.json({ error: "forbidden", message: "上書きできるのは、この名刺を登録した人と管理者だけです。「併記して保存」を選んでください。" }, { status: 403 });
     }
     const imageName = image.name || `business-card-${Date.now()}.jpg`;
     const registration = input.merge ? await supabase.rpc("merge_business_card_into_contact", {

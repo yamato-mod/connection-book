@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { apiError } from "@/lib/api-error";
 import { asAccessRole, assertSameOrigin, requireMember, requireOrganizationManager, requireOwner } from "@/lib/server-auth";
-import { resolveSender, type MailSettings } from "@/lib/organization-mail";
+import { canEditContact, resolveSender, type MailSettings } from "@/lib/organization-mail";
 import { googleDrive } from "@/lib/google";
 import { isConfiguredValue } from "@/lib/env-config";
 
@@ -67,7 +67,7 @@ export async function GET(request: Request) {
         supabase.from("business_cards").select("id,drive_status,drive_error,image_name,image_mime_type,image_google_file_id").eq("club_id",member.club_id).eq("contact_id",id).order("captured_at",{ascending:false}),
       ]);
       throwFirst(contact, notes, followups, emails, cards, events,tags,businessCards);
-      return Response.json({ canManage:member.access_role!=="member", contact: contact.data, notes: notes.data ?? [], followups: followups.data ?? [], emails: emails.data ?? [], files: cards.data ?? [], events: events.data ?? [],tags:tags.data??[],businessCards:businessCards.data??[] });
+      return Response.json({ canManage:member.access_role!=="member", canEdit:canEditContact(member,contact.data), contact: contact.data, notes: notes.data ?? [], followups: followups.data ?? [], emails: emails.data ?? [], files: cards.data ?? [], events: events.data ?? [],tags:tags.data??[],businessCards:businessCards.data??[] });
     }
     if (view === "events") {
       const result = await supabase.from("events").select("id,name,starts_at,ends_at,location,is_current,event_contacts(contact:contacts(classification)),email_logs(id)").eq("club_id", member.club_id).order("starts_at", { ascending: false });
@@ -146,7 +146,9 @@ export async function POST(request: Request) {
       }
       return Response.json({ ok: true, driveFiles: fileIds.length, driveTrashFailed });
     } else if (input.action === "update_contact") {
-      requireOrganizationManager(member);
+      const target = await supabase.from("contacts").select("created_by").eq("club_id", member.club_id).eq("id", input.id).maybeSingle(); throwFirst(target);
+      if (!target.data) return Response.json({ error: "not_found", message: "この名刺は削除されています。" }, { status: 404 });
+      if (!canEditContact(member, target.data)) return Response.json({ error: "forbidden", message: "編集できるのは、この名刺を登録した人と管理者だけです。" }, { status: 403 });
       const result = await supabase.from("contacts").update({ name: input.name, company_name: input.company, role: input.role, email: input.email, phone: input.phone, phone_normalized: input.phone.replace(/\D/g, ""), address: input.address, website: input.website, classification: input.classification, updated_at: new Date().toISOString() }).eq("club_id", member.club_id).eq("id", input.id); throwFirst(result);
       await audit(supabase,member,"contact_updated","contact",input.id,{classification:input.classification});
     } else if (input.action === "save_template") {

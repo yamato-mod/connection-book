@@ -1,5 +1,5 @@
 import {describe,expect,it} from "vitest";
-import {canManageOrganization,enforcedCc,isGoogleReauthError,resolveSender,senderModeForRole,type MailSettings} from "../src/lib/organization-mail";
+import {canEditContact,canManageOrganization,enforcedCc,isGoogleReauthError,resolveSender,senderModeForRole,type MailSettings} from "../src/lib/organization-mail";
 const defaults:MailSettings={admin_sender_mode:"organization_email",member_sender_mode:"personal_email",auto_cc_organization_email:true,allow_member_to_disable_cc:false};
 
 describe("organization mail routing",()=>{
@@ -22,5 +22,11 @@ describe("organization mail routing",()=>{
   expect(isGoogleReauthError({response:{data:{error:"invalid_grant"}}})).toBe(true);
   expect(isGoogleReauthError(new Error("invalid_grant: Token has been expired or revoked."))).toBe(true);
   expect(isGoogleReauthError(new Error("Quota exceeded"))).toBe(false);
+ });
+ it("lets members edit only the contacts they registered",()=>{
+  expect(canEditContact({id:"m1",access_role:"member"},{created_by:"m1"})).toBe(true);
+  expect(canEditContact({id:"m1",access_role:"member"},{created_by:"m2"})).toBe(false);
+  expect(canEditContact({id:"m1",access_role:"member"},{created_by:null})).toBe(false);
+  expect(canEditContact({id:"a1",access_role:"admin"},{created_by:"m2"})).toBe(true);
  });
 });

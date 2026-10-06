@@ -68,3 +68,8 @@ export function isGoogleReauthError(error: unknown) {
   const code = e?.response?.data?.error;
   return code === "invalid_grant" || (typeof e?.message === "string" && e.message.includes("invalid_grant"));
 }
+
+/** Owners/admins can edit any contact; a member can edit the contacts they registered themselves (to fix their own OCR/typing mistakes). */
+export function canEditContact(member: { id: string; access_role: string }, contact: { created_by: string | null }) {
+  return member.access_role === "owner" || member.access_role === "admin" || (contact.created_by !== null && contact.created_by === member.id);
+}
