@@ -28,8 +28,13 @@ describe("organization onboarding security contract",()=>{
     expect(migration).toContain("to service_role");
   });
 
-  it("does not auto-create Auth users during member login",()=>{
-    expect(page).toContain('shouldCreateUser:nextIntent==="create"');
+  // 組織コードでの入部申請には、先にログイン（Authユーザー）が必要。
+  // ログインできるだけでは何も見られず、代表または幹部が承認するまで pending のまま。
+  it("lets new people sign in so they can apply with an invite code, without granting access",()=>{
+    const joinRoute=readFileSync(join(process.cwd(),"src/app/api/onboarding/join/route.ts"),"utf8");
+    expect(page).toContain("shouldCreateUser:true");
+    expect(joinRoute).toContain('status: "pending"');
+    expect(page).not.toContain("Signups not allowed");
     expect(page).toContain('setIntent("member")');
     expect(page).toContain('setIntent("create")');
   });
