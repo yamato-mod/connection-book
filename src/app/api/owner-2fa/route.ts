@@ -1,292 +1,191 @@
-import { NextRequest, NextResponse } from "next/server";
-import { z } from "zod";
-import { createAdminClient } from "@/lib/supabase/admin";
-import { requireMember, requireOwner } from "@/lib/server-auth";
 import crypto from "crypto";
+import { z } from "zod";
+import { apiError } from "@/lib/api-error";
+import { sendGmail } from "@/lib/google";
+import { decryptGoogleToken } from "@/lib/google-token-crypto";
+import { isGoogleReauthError } from "@/lib/organization-mail";
+import { assertSameOrigin, ownerNeeds2FA, requireMember, requireOwner } from "@/lib/server-auth";
 
-const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
-const MAX_ATTEMPTS = 5;
-const OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
+/**
+ * オーナーの二段階認証。
+ * - 認証コードは、部の組織Googleアカウント（Gmail）から、オーナーが登録した個人メールに送る。
+ * - 確認済みかどうかはログイン（Supabaseの session_id）ごとに記録する。判定は server-auth の ownerNeeds2FA。
+ * - コードは平文で保存しない。失敗が続いたら15分間ロックする。
+ */
 
-function generateOtp(): string {
-  return String(crypto.randomInt(100000, 999999));
-}
+const OTP_TTL_MS = 10 * 60 * 1000;
+const LOCK_WINDOW_MS = 15 * 60 * 1000;
+const MAX_FAILURES = 5;
+const MAX_SENDS = 5;
 
-function hashOtp(otp: string): string {
-  return crypto.createHash("sha256").update(otp).digest("hex");
-}
+const schema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("get_status") }),
+  z.object({ action: z.literal("send_otp") }),
+  z.object({ action: z.literal("verify_otp"), sessionId: z.string().uuid(), otp: z.string().regex(/^\d{6}$/) }),
+  z.object({ action: z.literal("register_email"), personalEmail: z.string().trim().toLowerCase().email().max(320) }),
+  z.object({ action: z.literal("confirm_email"), sessionId: z.string().uuid(), otp: z.string().regex(/^\d{6}$/) }),
+  z.object({ action: z.literal("remove_email") }),
+]);
 
-// ── Actions ──
-const sendOtpSchema = z.object({ action: z.literal("send_otp") });
-const verifyOtpSchema = z.object({ action: z.literal("verify_otp"), otp: z.string().length(6), sessionId: z.string() });
-const registerEmailSchema = z.object({ action: z.literal("register_email"), personalEmail: z.string().email().max(320) });
-const sendVerifyEmailOtpSchema = z.object({ action: z.literal("send_verify_email_otp"), personalEmail: z.string().email().max(320) });
-const confirmEmailSchema = z.object({ action: z.literal("confirm_email"), otp: z.string().length(6), personalEmail: z.string().email().max(320) });
-const getStatusSchema = z.object({ action: z.literal("get_status") });
+type Db = Awaited<ReturnType<typeof requireMember>>["supabase"];
+type Member = Awaited<ReturnType<typeof requireMember>>["member"];
 
-export async function POST(request: NextRequest) {
+export async function POST(request: Request) {
   try {
-    const { supabase, member } = await requireMember(request);
-    const body = await request.json();
+    assertSameOrigin(request);
+    // この画面で認証するので、認証前でも通す。オーナー以外は使えない。
+    const { supabase, member, authSessionId } = await requireMember(request, { allowPendingOwner2FA: true });
+    requireOwner(member);
+    const parsed = schema.safeParse(await request.json());
+    if (!parsed.success) return json({ error: "invalid_input", message: "入力が正しくありません。" }, 400);
+    const input = parsed.data;
+    if (!authSessionId) return json({ error: "invalid_session", message: "ログイン情報を確認できませんでした。ログインし直してください。" }, 401);
 
-    // ── get_status: check if owner has 2FA email registered ──
-    if (body.action === "get_status") {
-      requireOwner(member);
-      const { data: twoFaEmail } = await supabase
-        .from("owner_2fa_emails")
-        .select("personal_email, verified_at")
-        .eq("club_id", member.club_id)
-        .maybeSingle();
-      return NextResponse.json({
-        hasPersonalEmail: !!twoFaEmail,
-        personalEmail: twoFaEmail?.personal_email ?? null,
-      });
+    const registered = await supabase.from("owner_2fa_emails").select("personal_email").eq("club_id", member.club_id).eq("member_id", member.id).maybeSingle();
+    if (registered.error) throw registered.error;
+    const personalEmail = registered.data?.personal_email ?? null;
+
+    if (input.action === "get_status") {
+      const pending = await ownerNeeds2FA(supabase, member, authSessionId);
+      return json({ hasPersonalEmail: Boolean(personalEmail), maskedEmail: personalEmail ? maskEmail(personalEmail) : null, verified: !pending });
     }
 
-    // ── send_otp: send OTP to owner's registered personal email ──
-    if (body.action === "send_otp") {
-      requireOwner(member);
+    // 登録済みの個人メールを変える・外すのは、このログインで認証が済んでいるときだけ。
+    if ((input.action === "register_email" || input.action === "confirm_email" || input.action === "remove_email") && personalEmail && await ownerNeeds2FA(supabase, member, authSessionId)) {
+      return json({ error: "owner_2fa_required", message: "先に今の個人メールで認証してください。" }, 403);
+    }
 
-      // Check rate limit
-      const locked = await isRateLimited(supabase, member.id, member.club_id);
-      if (locked) {
-        return NextResponse.json(
-          { error: "rate_limited", message: "試行回数が上限に達しました。15分後に再度お試しください。" },
-          { status: 429 }
-        );
-      }
+    if (input.action === "remove_email") {
+      const removed = await supabase.from("owner_2fa_emails").delete().eq("club_id", member.club_id).eq("member_id", member.id);
+      if (removed.error) throw removed.error;
+      await audit(supabase, member, "owner_2fa_disabled");
+      return json({ removed: true });
+    }
 
-      // Get registered personal email
-      const { data: twoFaEmail } = await supabase
-        .from("owner_2fa_emails")
-        .select("personal_email")
-        .eq("club_id", member.club_id)
-        .maybeSingle();
+    if (input.action === "send_otp" || input.action === "register_email") {
+      const target = input.action === "send_otp" ? personalEmail : input.personalEmail;
+      if (!target) return json({ error: "no_personal_email", message: "個人メールが登録されていません。設定画面から登録してください。" }, 400);
+      if (await isLocked(supabase, member)) return locked();
+      const recentSends = await supabase.from("owner_2fa_verifications").select("id", { count: "exact", head: true }).eq("member_id", member.id).neq("otp_hash", "").gte("created_at", new Date(Date.now() - LOCK_WINDOW_MS).toISOString());
+      if (recentSends.error) throw recentSends.error;
+      if ((recentSends.count ?? 0) >= MAX_SENDS) return json({ error: "too_many_sends", message: "認証コードの送信が多すぎます。15分ほど待ってから、もう一度お試しください。" }, 429);
 
-      if (!twoFaEmail) {
-        return NextResponse.json(
-          { error: "no_personal_email", message: "個人メールが未登録です。先に個人メールを登録してください。" },
-          { status: 400 }
-        );
-      }
-
-      // Generate OTP
-      const otp = generateOtp();
+      const purpose = input.action === "send_otp" ? "login" : "register_email";
+      const otp = String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
       const sessionId = crypto.randomUUID();
       const expiresAt = new Date(Date.now() + OTP_TTL_MS).toISOString();
 
-      // Store verification record
-      await supabase.from("owner_2fa_verifications").insert({
-        club_id: member.club_id,
-        member_id: member.id,
-        session_id: sessionId,
-        otp_hash: hashOtp(otp),
-        expires_at: expiresAt,
-      });
+      const sent = await sendCode(supabase, member, target, otp, purpose);
+      if (sent) return sent;
 
-      // Send OTP email via Supabase Auth magic link OTP (we use the admin API to send raw email)
-      // Since Supabase Auth handles OTP natively, we'll use a simpler approach:
-      // Send via the Supabase edge function or directly via the SMTP configured in Supabase
-      // For this app, we use Supabase's auth.admin to send OTP
-      // Actually, we need to send a plain OTP email. Let's use Supabase's built-in email sending.
-
-      // Use Supabase Auth's signInWithOtp to send the code to personal email
-      // This is a workaround: we send OTP to the personal email address
-      const { error: otpError } = await supabase.auth.admin.generateLink({
-        type: "magiclink",
-        email: twoFaEmail.personal_email,
-        options: { data: { otp_code: otp, purpose: "owner_2fa" } },
-      });
-
-      // Even if generateLink returns the link, we just need the side effect of email being sent
-      // For a more robust approach, we'd use a custom email template
-      // For now, store the OTP and have the client show it needs to be entered
-      // The actual email sending depends on Supabase email config
-
-      // Alternative: use the OTP directly without email (stored in DB, client sends it)
-      // In production, this would be replaced with proper email sending via Gmail API or SMTP
-
-      return NextResponse.json({
-        sessionId,
-        expiresAt,
-        // In production, remove this - OTP should only be sent via email
-        // For development/testing, we might include a hint
-        maskedEmail: maskEmail(twoFaEmail.personal_email),
-      });
+      const created = await supabase.from("owner_2fa_verifications").insert({ club_id: member.club_id, member_id: member.id, session_id: sessionId, otp_hash: hashOtp(sessionId, otp), expires_at: expiresAt, purpose, target_email: target, auth_session_id: authSessionId });
+      if (created.error) throw created.error;
+      return json({ sessionId, expiresAt, maskedEmail: maskEmail(target) });
     }
 
-    // ── verify_otp: verify the 2FA OTP ──
-    if (body.action === "verify_otp") {
-      const parsed = verifyOtpSchema.safeParse(body);
-      if (!parsed.success) return NextResponse.json({ error: "invalid_input", message: "入力が不正です。" }, { status: 400 });
-      requireOwner(member);
-
-      // Check rate limit
-      const locked = await isRateLimited(supabase, member.id, member.club_id);
-      if (locked) {
-        return NextResponse.json(
-          { error: "rate_limited", message: "試行回数が上限に達しました。15分後に再度お試しください。" },
-          { status: 429 }
-        );
-      }
-
-      const { data: verification } = await supabase
-        .from("owner_2fa_verifications")
-        .select("id, otp_hash, expires_at, verified_at")
-        .eq("session_id", parsed.data.sessionId)
-        .eq("member_id", member.id)
-        .maybeSingle();
-
-      if (!verification) {
-        await recordAttempt(supabase, member.id, member.club_id, false);
-        return NextResponse.json({ error: "invalid_session", message: "認証セッションが見つかりません。" }, { status: 400 });
-      }
-
-      if (verification.verified_at) {
-        return NextResponse.json({ error: "already_verified", message: "このセッションは既に認証済みです。" }, { status: 400 });
-      }
-
-      if (new Date(verification.expires_at) < new Date()) {
-        await recordAttempt(supabase, member.id, member.club_id, false);
-        return NextResponse.json({ error: "expired", message: "認証コードの有効期限が切れました。再度送信してください。" }, { status: 400 });
-      }
-
-      if (hashOtp(parsed.data.otp) !== verification.otp_hash) {
-        await recordAttempt(supabase, member.id, member.club_id, false);
-
-        // Check if now locked out
-        const nowLocked = await isRateLimited(supabase, member.id, member.club_id);
-        return NextResponse.json(
-          { error: "invalid_otp", message: nowLocked ? "試行回数が上限に達しました。15分後に再度お試しください。" : "認証コードが正しくありません。" },
-          { status: 400 }
-        );
-      }
-
-      // Mark as verified
-      await supabase
-        .from("owner_2fa_verifications")
-        .update({ verified_at: new Date().toISOString() })
-        .eq("id", verification.id);
-
-      await recordAttempt(supabase, member.id, member.club_id, true);
-
-      return NextResponse.json({ verified: true });
+    // verify_otp / confirm_email
+    if (await isLocked(supabase, member)) return locked();
+    const purpose = input.action === "verify_otp" ? "login" : "register_email";
+    const found = await supabase.from("owner_2fa_verifications").select("id, otp_hash, expires_at, verified_at, target_email")
+      .eq("session_id", input.sessionId).eq("member_id", member.id).eq("purpose", purpose).eq("auth_session_id", authSessionId).maybeSingle();
+    if (found.error) throw found.error;
+    const verification = found.data;
+    if (!verification || verification.verified_at) return json({ error: "invalid_session", message: "この認証コードは使えません。もう一度コードを送信してください。" }, 400);
+    if (new Date(verification.expires_at).getTime() < Date.now()) return json({ error: "expired", message: "認証コードの有効期限（10分）が切れました。もう一度送信してください。" }, 400);
+    if (!sameHash(hashOtp(input.sessionId, input.otp), verification.otp_hash)) {
+      await recordAttempt(supabase, member, false);
+      const nowLocked = await isLocked(supabase, member);
+      return json({ error: "invalid_otp", message: nowLocked ? "失敗が続いたため、15分間ロックしました。" : "認証コードが違います。" }, 400);
     }
 
-    // ── register_email: register personal email for 2FA (initial setup) ──
-    if (body.action === "register_email" || body.action === "send_verify_email_otp") {
-      requireOwner(member);
-      const schema = body.action === "register_email" ? registerEmailSchema : sendVerifyEmailOtpSchema;
-      const parsed = schema.safeParse(body);
-      if (!parsed.success) return NextResponse.json({ error: "invalid_input", message: "有効なメールアドレスを入力してください。" }, { status: 400 });
+    // 使い終わったコードは二度と使えないようにする（同時に2回送られても1回だけ通す）。
+    const now = new Date().toISOString();
+    const consumed = await supabase.from("owner_2fa_verifications").update({ verified_at: now }).eq("id", verification.id).is("verified_at", null).select("id");
+    if (consumed.error) throw consumed.error;
+    if (!consumed.data?.length) return json({ error: "invalid_session", message: "この認証コードは使えません。もう一度コードを送信してください。" }, 400);
+    await recordAttempt(supabase, member, true);
 
-      const personalEmail = (parsed.data as { personalEmail: string }).personalEmail;
-
-      // Generate OTP for email verification
-      const otp = generateOtp();
-      const sessionId = crypto.randomUUID();
-      const expiresAt = new Date(Date.now() + OTP_TTL_MS).toISOString();
-
-      // Store pending verification
-      await supabase.from("owner_2fa_verifications").insert({
-        club_id: member.club_id,
-        member_id: member.id,
-        session_id: sessionId,
-        otp_hash: hashOtp(otp),
-        expires_at: expiresAt,
-      });
-
-      // In production, send OTP to the email address
-      // For now, we use Supabase Auth to send OTP
-      await supabase.auth.admin.generateLink({
-        type: "magiclink",
-        email: personalEmail,
-        options: { data: { otp_code: otp, purpose: "owner_2fa_email_verify" } },
-      });
-
-      return NextResponse.json({
-        sessionId,
-        expiresAt,
-        maskedEmail: maskEmail(personalEmail),
-      });
+    if (input.action === "confirm_email") {
+      const saved = await supabase.from("owner_2fa_emails").upsert({ club_id: member.club_id, member_id: member.id, personal_email: verification.target_email, verified_at: now, updated_at: now }, { onConflict: "club_id" });
+      if (saved.error) throw saved.error;
+      // 登録に使ったこのログインは、そのまま認証済みとして扱う。
+      const loginMark = await supabase.from("owner_2fa_verifications").insert({ club_id: member.club_id, member_id: member.id, session_id: crypto.randomUUID(), otp_hash: "", expires_at: now, verified_at: now, purpose: "login", auth_session_id: authSessionId });
+      if (loginMark.error) throw loginMark.error;
+      await audit(supabase, member, personalEmail ? "owner_2fa_email_changed" : "owner_2fa_enabled");
+      return json({ registered: true, maskedEmail: maskEmail(verification.target_email ?? "") });
     }
-
-    // ── confirm_email: confirm the personal email with OTP ──
-    if (body.action === "confirm_email") {
-      const parsed = confirmEmailSchema.safeParse(body);
-      if (!parsed.success) return NextResponse.json({ error: "invalid_input", message: "入力が不正です。" }, { status: 400 });
-      requireOwner(member);
-
-      // We need a sessionId too — add it
-      const sessionId = body.sessionId;
-      if (!sessionId) return NextResponse.json({ error: "invalid_input", message: "セッションIDが必要です。" }, { status: 400 });
-
-      const { data: verification } = await supabase
-        .from("owner_2fa_verifications")
-        .select("id, otp_hash, expires_at, verified_at")
-        .eq("session_id", sessionId)
-        .eq("member_id", member.id)
-        .maybeSingle();
-
-      if (!verification || verification.verified_at || new Date(verification.expires_at) < new Date()) {
-        return NextResponse.json({ error: "invalid_session", message: "認証セッションが無効または期限切れです。" }, { status: 400 });
-      }
-
-      if (hashOtp(parsed.data.otp) !== verification.otp_hash) {
-        return NextResponse.json({ error: "invalid_otp", message: "認証コードが正しくありません。" }, { status: 400 });
-      }
-
-      // Mark verification as confirmed
-      await supabase.from("owner_2fa_verifications").update({ verified_at: new Date().toISOString() }).eq("id", verification.id);
-
-      // Upsert owner_2fa_emails
-      const { error: upsertError } = await supabase
-        .from("owner_2fa_emails")
-        .upsert({
-          club_id: member.club_id,
-          member_id: member.id,
-          personal_email: parsed.data.personalEmail,
-          verified_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        }, { onConflict: "club_id" });
-
-      if (upsertError) {
-        return NextResponse.json({ error: "save_failed", message: "個人メールの保存に失敗しました。" }, { status: 500 });
-      }
-
-      return NextResponse.json({ registered: true });
-    }
-
-    return NextResponse.json({ error: "unknown_action", message: "不明なアクションです。" }, { status: 400 });
-  } catch (e) {
-    if (e instanceof Response) return e;
-    console.error("Owner 2FA error:", e);
-    return NextResponse.json({ error: "internal", message: "サーバーエラーが発生しました。" }, { status: 500 });
+    await audit(supabase, member, "owner_2fa_verified");
+    return json({ verified: true });
+  } catch (error) {
+    return apiError(error);
   }
 }
 
-// ── Helpers ──
-function maskEmail(email: string): string {
-  const [local, domain] = email.split("@");
-  if (local.length <= 2) return `${local[0]}***@${domain}`;
-  return `${local[0]}${local[1]}${"*".repeat(Math.min(local.length - 2, 5))}@${domain}`;
+/** 組織Gmailから認証コードを送る。送れなかったときはエラーのレスポンスを返す。 */
+async function sendCode(supabase: Db, member: Member, to: string, otp: string, purpose: "login" | "register_email") {
+  const connection = await supabase.from("organization_google_connections").select("google_email, encrypted_refresh_token, status").eq("club_id", member.club_id).maybeSingle();
+  if (connection.error) throw connection.error;
+  if (!connection.data || connection.data.status !== "active") {
+    return json({ error: "organization_google_not_connected", message: "組織Googleアカウントが接続されていないため、認証コードを送れません。" }, 409);
+  }
+  const subject = purpose === "login" ? "【つながり帳】オーナー認証コード" : "【つながり帳】個人メール登録の確認コード";
+  const body = [
+    `${member.name} さん`,
+    "",
+    purpose === "login" ? "つながり帳のオーナー認証コードです。" : "つながり帳の二段階認証に、このメールアドレスを登録するための確認コードです。",
+    "",
+    `認証コード：${otp}`,
+    "",
+    "有効期限は10分です。",
+    "心当たりがない場合は、このメールを無視してください。誰かがオーナーのアカウントでログインしようとしている可能性があります。",
+  ].join("\n");
+  try {
+    await sendGmail({ from: connection.data.google_email, to, subject, body, refreshToken: decryptGoogleToken(connection.data.encrypted_refresh_token) });
+    return null;
+  } catch (error) {
+    console.error("Owner 2FA mail failed", error);
+    if (isGoogleReauthError(error)) {
+      await supabase.from("organization_google_connections").update({ status: "error" }).eq("club_id", member.club_id);
+      return json({ error: "organization_google_reauth_required", message: "組織Googleアカウントの接続が切れているため、認証コードを送れません。" }, 409);
+    }
+    return json({ error: "send_failed", message: "認証コードのメールを送れませんでした。少し待ってから、もう一度お試しください。" }, 502);
+  }
 }
 
-async function isRateLimited(supabase: ReturnType<typeof createAdminClient>, memberId: string, clubId: string): Promise<boolean> {
-  const windowStart = new Date(Date.now() - RATE_LIMIT_WINDOW_MS).toISOString();
-  const { count } = await supabase
-    .from("owner_2fa_attempts")
-    .select("id", { count: "exact", head: true })
-    .eq("member_id", memberId)
-    .eq("success", false)
-    .gte("attempted_at", windowStart);
-  return (count ?? 0) >= MAX_ATTEMPTS;
+function hashOtp(sessionId: string, otp: string) {
+  return crypto.createHash("sha256").update(`${sessionId}:${otp}`).digest("hex");
 }
 
-async function recordAttempt(supabase: ReturnType<typeof createAdminClient>, memberId: string, clubId: string, success: boolean) {
-  await supabase.from("owner_2fa_attempts").insert({
-    club_id: clubId,
-    member_id: memberId,
-    success,
-  });
+function sameHash(a: string, b: string) {
+  const left = Buffer.from(a), right = Buffer.from(b);
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
+function maskEmail(email: string) {
+  const [local = "", domain = ""] = email.split("@");
+  const visible = local.slice(0, Math.min(2, Math.max(1, local.length - 1)));
+  return `${visible}${"*".repeat(Math.max(3, Math.min(local.length - visible.length, 6)))}@${domain}`;
+}
+
+async function isLocked(supabase: Db, member: Member) {
+  const failures = await supabase.from("owner_2fa_attempts").select("id", { count: "exact", head: true }).eq("member_id", member.id).eq("success", false).gte("attempted_at", new Date(Date.now() - LOCK_WINDOW_MS).toISOString());
+  if (failures.error) throw failures.error;
+  return (failures.count ?? 0) >= MAX_FAILURES;
+}
+
+async function recordAttempt(supabase: Db, member: Member, success: boolean) {
+  const result = await supabase.from("owner_2fa_attempts").insert({ club_id: member.club_id, member_id: member.id, success });
+  if (result.error) throw result.error;
+}
+
+async function audit(supabase: Db, member: Member, action: string) {
+  await supabase.from("audit_logs").insert({ club_id: member.club_id, actor_member_id: member.id, action, entity_type: "member", entity_id: member.id, metadata: {} });
+}
+
+function locked() {
+  return json({ error: "rate_limited", message: "失敗が続いたため、15分間ロックしています。時間をおいてお試しください。" }, 429);
+}
+
+function json(body: unknown, status = 200) {
+  return Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
 }

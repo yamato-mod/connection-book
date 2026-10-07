@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { apiError } from "@/lib/api-error";
-import { asAccessRole, assertSameOrigin, requireMember, requireOrganizationManager, requireOwner } from "@/lib/server-auth";
+import { asAccessRole, assertSameOrigin, ownerNeeds2FA, requireMember, requireOrganizationManager, requireOwner } from "@/lib/server-auth";
 import { canEditContact, resolveSender, type MailSettings } from "@/lib/organization-mail";
 import { canActOnMember, canSuspend, canViewContactDetails, isOfficer, limitContact, searchableText } from "@/lib/membership";
 import { googleDrive } from "@/lib/google";
@@ -47,9 +47,10 @@ const mutationSchema = z.discriminatedUnion("action", [
 
 export async function GET(request: Request) {
   try {
-    const { member, supabase } = await requireMember(request);
     const url = new URL(request.url);
     const view = url.searchParams.get("view") ?? "dashboard";
+    // ホーム（掲示板）だけは、オーナー認証の画面を出すために認証前でも読める。中身は認証が済むまで返さない。
+    const { member, supabase, authSessionId } = await requireMember(request, { allowPendingOwner2FA: view === "bulletin" });
     if (view === "dashboard") {
       const today = new Date(); today.setHours(0, 0, 0, 0);
       const tomorrow=new Date(today.getTime()+86400000),weekEnd=new Date(today.getTime()+7*86400000);
@@ -127,34 +128,26 @@ export async function GET(request: Request) {
       const legacyGoogleConfigured = [process.env.GOOGLE_CLIENT_ID,process.env.GOOGLE_CLIENT_SECRET,process.env.GOOGLE_REFRESH_TOKEN,process.env.GOOGLE_SHARED_GMAIL].every(isConfiguredValue);
       const oauthClientConfigured=[process.env.GOOGLE_CLIENT_ID,process.env.GOOGLE_CLIENT_SECRET,process.env.GOOGLE_REDIRECT_URI,process.env.GOOGLE_TOKEN_ENCRYPTION_KEY,process.env.GOOGLE_OAUTH_STATE_SECRET].every(isConfiguredValue);
       const sender=resolveSender({role:asAccessRole(member.access_role),settings:mailSettings.data as MailSettings,organizationGoogle:organizationGoogle.data,userGoogle:userGoogle.data});
-      return Response.json({ member,sender,canSuspend:canSuspend(member),libraryRequests:libraryRequests.data??[],organization:club.data,mailSettings:mailSettings.data,members:members.data??[],organizationGoogle:organizationGoogle.data,userGoogle:userGoogle.data,oauthClientConfigured,devices: devices.data ?? [], templates: templates.data ?? [], jobs: jobs.data ?? [], integrations: { gmail: Boolean(organizationGoogle.data||userGoogle.data), drive: legacyGoogleConfigured, people: legacyGoogleConfigured, calendar: legacyGoogleConfigured } });
+      // 「送信時に選択」の場合は、両方の送信元の状態を返して送信画面で選べるようにする。
+      const role=asAccessRole(member.access_role),baseMode=role==="member"?(mailSettings.data as MailSettings).member_sender_mode:(mailSettings.data as MailSettings).admin_sender_mode;
+      const senderChoices=baseMode==="choosable"?{organization_email:resolveSender({role,settings:mailSettings.data as MailSettings,organizationGoogle:organizationGoogle.data,userGoogle:userGoogle.data,senderModeOverride:"organization_email"}),personal_email:resolveSender({role,settings:mailSettings.data as MailSettings,organizationGoogle:organizationGoogle.data,userGoogle:userGoogle.data,senderModeOverride:"personal_email"})}:null;
+      return Response.json({ member,sender,senderChoices,canSuspend:canSuspend(member),libraryRequests:libraryRequests.data??[],organization:club.data,mailSettings:mailSettings.data,members:members.data??[],organizationGoogle:organizationGoogle.data,userGoogle:userGoogle.data,oauthClientConfigured,devices: devices.data ?? [], templates: templates.data ?? [], jobs: jobs.data ?? [], integrations: { gmail: Boolean(organizationGoogle.data||userGoogle.data), drive: legacyGoogleConfigured, people: legacyGoogleConfigured, calendar: legacyGoogleConfigured } });
     }
     if (view === "bulletin") {
+      if (await ownerNeeds2FA(supabase, member, authSessionId)) {
+        return Response.json({ owner2faRequired: true, member: { name: member.name, access_role: member.access_role } }, { headers: { "Cache-Control": "no-store" } });
+      }
       const manager = member.access_role === "owner" || member.access_role === "admin";
-      const [announcements, jobPostings, event] = await Promise.all([
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const [announcements, jobPostings, event, undecidedCount, overdueCount] = await Promise.all([
         supabase.from("announcements").select("id,title,body,pinned,published_at,author:members!announcements_author_member_id_fkey(name)").eq("club_id", member.club_id).order("pinned", { ascending: false }).order("published_at", { ascending: false }).limit(50),
         supabase.from("job_postings").select("id,title,company,body,hourly_rate,location,deadline,contact_info,is_active,published_at,author:members!job_postings_author_member_id_fkey(name)").eq("club_id", member.club_id).eq("is_active", true).order("published_at", { ascending: false }).limit(50),
         member.selected_event_id ? supabase.from("events").select("id,name,starts_at").eq("club_id", member.club_id).eq("id", member.selected_event_id).maybeSingle() : supabase.from("events").select("id,name,starts_at").eq("club_id", member.club_id).eq("is_current", true).maybeSingle(),
-      ]);
-      throwFirst(announcements, jobPostings);
-      const today = new Date(); today.setHours(0, 0, 0, 0);
-      const [undecidedCount, overdueCount] = await Promise.all([
         supabase.from("contacts").select("id", { count: "exact", head: true }).eq("club_id", member.club_id).eq("classification", "undecided"),
         supabase.from("followups").select("id", { count: "exact", head: true }).eq("club_id", member.club_id).eq("status", "open").lt("due_at", today.toISOString()),
       ]);
-      // Check owner 2FA status
-      let owner2faRequired = false;
-      let owner2faHasEmail = false;
-      if (member.access_role === "owner") {
-        const { data: twoFaEmail } = await supabase.from("owner_2fa_emails").select("id").eq("club_id", member.club_id).maybeSingle();
-        owner2faHasEmail = !!twoFaEmail;
-        if (twoFaEmail) {
-          const windowStart = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-          const { data: verified } = await supabase.from("owner_2fa_verifications").select("id").eq("member_id", member.id).not("verified_at", "is", null).gte("verified_at", windowStart).limit(1).maybeSingle();
-          owner2faRequired = !verified;
-        }
-      }
-      return Response.json({ member, canManage: manager, announcements: announcements.data ?? [], jobPostings: jobPostings.data ?? [], currentEvent: event?.data ?? null, statusSummary: { undecided: undecidedCount.count ?? 0, overdue: overdueCount.count ?? 0 }, owner2faRequired, owner2faHasEmail });
+      throwFirst(announcements, jobPostings, event, undecidedCount, overdueCount);
+      return Response.json({ member, canManage: manager, announcements: announcements.data ?? [], jobPostings: jobPostings.data ?? [], currentEvent: event.data ?? null, statusSummary: { undecided: undecidedCount.count ?? 0, overdue: overdueCount.count ?? 0 }, owner2faRequired: false });
     }
     if (view === "business_contests") {
       const manager = member.access_role === "owner" || member.access_role === "admin";

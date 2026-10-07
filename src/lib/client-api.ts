@@ -22,7 +22,11 @@ export async function appFetch<T>(path: string, init: RequestInit = {}): Promise
     clearTimeout(timeout);
   }
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.message ?? errorMessage(payload.error, response.status));
+  if (!response.ok) {
+    // オーナー認証が済んでいないときは、認証画面のあるホームへ戻す。
+    if (payload.error === "owner_2fa_required" && typeof window !== "undefined" && window.location.pathname !== "/") window.location.assign("/");
+    throw new Error(payload.message ?? errorMessage(payload.error, response.status));
+  }
   return payload as T;
 }
 

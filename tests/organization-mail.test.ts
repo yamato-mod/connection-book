@@ -30,3 +30,14 @@ describe("organization mail routing",()=>{
   expect(canEditContact({id:"a1",access_role:"admin"},{created_by:"m2"})).toBe(true);
  });
 });
+
+describe("choosable sender mode", () => {
+  const settings = { admin_sender_mode: "choosable", member_sender_mode: "personal_email", auto_cc_organization_email: false, allow_member_to_disable_cc: false } as const;
+  it("lets officers pick the sender at send time and defaults to the organization", () => {
+    expect(senderModeForRole("admin", settings)).toBe("organization_email");
+    expect(senderModeForRole("owner", settings, "personal_email")).toBe("personal_email");
+  });
+  it("never lets members override their fixed sender", () => {
+    expect(senderModeForRole("member", settings, "organization_email")).toBe("personal_email");
+  });
+});

@@ -37,7 +37,6 @@ type BulletinData = {
   currentEvent: { id: string; name: string; starts_at: string } | null;
   statusSummary: { undecided: number; overdue: number };
   owner2faRequired: boolean;
-  owner2faHasEmail: boolean;
 };
 
 type Tab = "announcements" | "jobs";
@@ -160,6 +159,7 @@ export default function Home() {
             </div>
           )}
           {twoFaError && <p className="mt-3 text-sm font-bold text-[#a93830]">{twoFaError}</p>}
+          <p className="mt-6 text-xs text-[#68746d]">コードは組織Googleアカウントから送られます。届かないときは迷惑メールフォルダを確認してください。</p>
         </section>
       </div>
     );
