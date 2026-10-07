@@ -6,7 +6,7 @@ import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { AlertTriangle, ArrowLeft, Camera, Check, ChevronRight, FilePenLine, LoaderCircle, Mail, Pencil, Save, ScanSearch, ShieldCheck, UserRoundCheck, X, Zap } from "lucide-react";
 import { Classification, ContactInput, contactSchema, quickContactSchema, DuplicateCandidate, MergeMode, renderTemplate } from "@/lib/domain";
-import { EmailCandidate, tesseractProvider } from "@/lib/ocr";
+import { EmailCandidate, cloudVisionProvider } from "@/lib/ocr";
 import { cropImageRegion, NormalizedRect, preprocessBusinessCardImage, rotateImage } from "@/lib/image-processing";
 import { createClient } from "@/lib/supabase/browser";
 import { appFetch, sha256Hex } from "@/lib/client-api";
@@ -76,7 +76,7 @@ export function CaptureWizard() {
 
   async function runOcr(blob: Blob) {
     setOcrProgress(0);
-    const result = await tesseractProvider.recognize(blob, ({ progress }) => setOcrProgress(Math.round(progress * 100)));
+    const result = await cloudVisionProvider.recognize(blob, ({ progress }) => setOcrProgress(Math.round(progress * 100)));
     setRawText(result.rawText);
     setEmailCandidates(result.emailCandidates);
     setManualEmail(false);
@@ -116,7 +116,7 @@ export function CaptureWizard() {
     setError(""); setOcrProgress(0);
     try {
       const cropped = await cropImageRegion(ocrImage, region);
-      const result = await tesseractProvider.recognize(cropped, ({ progress }) => setOcrProgress(Math.round(progress * 100)));
+      const result = await cloudVisionProvider.recognize(cropped, ({ progress }) => setOcrProgress(Math.round(progress * 100)));
       setRawText((current) => `${current}\n\n--- EMAIL REGION OCR ---\n${result.rawText}`.trim());
       setEmailCandidates(result.emailCandidates); setContact((current) => ({ ...current, email: "" }));
       setManualEmail(result.emailCandidates.length === 0); setSelectingRegion(false);

@@ -234,3 +234,24 @@ export async function recognizeBusinessCard(image: Blob, onProgress?: (progress:
 }
 
 export const tesseractProvider: OcrProvider = { recognize: recognizeBusinessCard };
+
+/**
+ * Google Cloud Vision via /api/ocr (much better on Japanese cards). Falls back to on-device
+ * Tesseract when the server isn't configured, the network fails, or Vision returns nothing.
+ */
+export async function recognizeWithCloudVision(image: Blob, onProgress?: (progress: OcrProgress) => void): Promise<BusinessCardOcrResult> {
+  try {
+    onProgress?.({ status: "クラウドOCRで読み取り中", progress: 0.2 });
+    const { appFetch } = await import("@/lib/client-api");
+    const form = new FormData();
+    form.set("image", new File([image], "business-card.jpg", { type: image.type || "image/jpeg" }));
+    const result = await appFetch<{ text: string }>("/api/ocr", { method: "POST", body: form });
+    onProgress?.({ status: "読み取り完了", progress: 1 });
+    if (result.text.trim()) return parseBusinessCardText(result.text);
+  } catch (cause) {
+    console.warn("Cloud OCR unavailable, falling back to on-device OCR", cause);
+  }
+  return recognizeBusinessCard(image, onProgress);
+}
+
+export const cloudVisionProvider: OcrProvider = { recognize: recognizeWithCloudVision };
