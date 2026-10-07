@@ -23,6 +23,16 @@ const postSchema = z.discriminatedUnion("action", [
     action: z.literal("delete"),
     eventId: z.string().uuid(),
   }),
+  z.object({
+    action: z.literal("update"),
+    eventId: z.string().uuid(),
+    name: z.string().trim().min(1).max(200),
+    startsAt: z.string().datetime(),
+    endsAt: z.string().datetime(),
+    location: z.string().max(300),
+    description: z.string().max(5000),
+    eventType: eventTypeSchema,
+  }),
 ]);
 
 const eventSelect =
@@ -122,6 +132,40 @@ export async function POST(request: Request) {
       });
 
       return Response.json({ ok: true });
+    }
+
+    if (input.action === "update") {
+      requireOrganizationManager(member);
+      if (new Date(input.endsAt) <= new Date(input.startsAt))
+        return Response.json(
+          { error: "invalid_event_range", message: "終了日時は開始日時より後にしてください。" },
+          { status: 400 },
+        );
+      const updated = await supabase
+        .from("events")
+        .update({
+          name: input.name,
+          description: input.description,
+          starts_at: input.startsAt,
+          ends_at: input.endsAt,
+          location: input.location,
+          event_type: input.eventType,
+        })
+        .eq("club_id", member.club_id)
+        .eq("id", input.eventId)
+        .select("id");
+      if (updated.error) throw updated.error;
+      if (!updated.data?.length)
+        return Response.json({ error: "not_found", message: "このイベントは削除されています。" }, { status: 404 });
+
+      await supabase.from("audit_logs").insert({
+        club_id: member.club_id,
+        actor_member_id: member.id,
+        action: "event_updated",
+        entity_type: "event",
+        entity_id: input.eventId,
+      });
+      return Response.json({ ok: true, id: input.eventId });
     }
 
     // action === "create"

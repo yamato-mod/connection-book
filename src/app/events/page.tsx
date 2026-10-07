@@ -10,6 +10,7 @@ import {
   Users,
   X,
   Trophy,
+  Pencil,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { EmptyState, ErrorState, LoadingState } from "@/components/data-state";
@@ -136,6 +137,7 @@ function EventDetailModal({
   onClose,
   onSelect,
   onDelete,
+  onEdit,
   busy,
 }: {
   event: LocalEvent;
@@ -144,6 +146,7 @@ function EventDetailModal({
   onClose: () => void;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
+  onEdit: (event: LocalEvent) => void;
   busy: boolean;
 }) {
   const cfg = EVENT_TYPE_CONFIG[event.event_type ?? "regular"];
@@ -215,6 +218,16 @@ function EventDetailModal({
             >
               <Trash2 size={14} className="inline mr-1" />
               削除
+            </button>
+          )}
+          {canManage && (
+            <button
+              className="rounded-xl border border-[#cfe0d5] px-3 py-2 text-sm font-bold text-[#176b45] transition hover:bg-[#f1faf4]"
+              disabled={busy}
+              onClick={() => onEdit(event)}
+            >
+              <Pencil size={14} className="inline mr-1" />
+              編集
             </button>
           )}
         </div>
@@ -447,6 +460,8 @@ export default function EventsPage() {
   const [busy, setBusy] = useState(false);
   const [view, setView] = useState<"calendar" | "list" | "bizcon">("calendar");
   const [selectedEvent, setSelectedEvent] = useState<LocalEvent | null>(null);
+  // 編集中のイベント（null なら新規作成）
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   /* Calendar month state */
   const today = new Date();
@@ -533,18 +548,12 @@ export default function EventsPage() {
         : new Date(new Date(start).getTime() + 2 * 3600_000).toISOString();
       await appFetch("/api/events", {
         method: "POST",
-        body: JSON.stringify({
-          action: "create",
-          name,
-          startsAt,
-          endsAt,
-          location,
-          description,
-          makeCurrent,
-          eventType,
-        }),
+        body: JSON.stringify(editingId
+          ? { action: "update", eventId: editingId, name, startsAt, endsAt, location, description, eventType }
+          : { action: "create", name, startsAt, endsAt, location, description, makeCurrent, eventType }),
       });
       setOpen(false);
+      setEditingId(null);
       setName("");
       setDescription("");
       setStart("");
@@ -595,9 +604,36 @@ export default function EventsPage() {
     }
   }
 
+  /* ── Edit an existing event (reuses the create form) ── */
+  function toLocalInput(iso: string | null) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+  function startEdit(event: LocalEvent) {
+    setEditingId(event.id);
+    setName(event.name);
+    setDescription(event.description ?? "");
+    setStart(toLocalInput(event.starts_at));
+    setEnd(toLocalInput(event.ends_at));
+    setLocation(event.location ?? "");
+    setEventType(event.event_type ?? "regular");
+    setError("");
+    setSelectedEvent(null);
+    setOpen(true);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+  function closeForm() {
+    setOpen(false);
+    setEditingId(null);
+    setName(""); setDescription(""); setStart(""); setEnd(""); setLocation(""); setEventType("regular");
+  }
+
   /* ── Open create form pre-filled with a date ── */
   function openCreateForDate(year: number, month: number, day: number) {
     if (!data?.canManage) return;
+    setEditingId(null);
     const d = new Date(year, month, day, 10, 0);
     const pad = (n: number) => String(n).padStart(2, "0");
     const localStr = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -646,7 +682,7 @@ export default function EventsPage() {
           <h1 className="text-3xl font-black">イベント</h1>
         </div>
         {data.canManage && (
-          <button className="btn-primary" onClick={() => setOpen(!open)}>
+          <button className="btn-primary whitespace-nowrap" onClick={() => (open ? closeForm() : (setEditingId(null), setOpen(true)))}>
             <CalendarPlus size={17} />
             新規イベント
           </button>
@@ -656,7 +692,10 @@ export default function EventsPage() {
       {/* ── Create event form ── */}
       {open && (
         <section className="card mt-4 grid gap-3 p-5">
-          <h3 className="font-black">イベントを作成</h3>
+          <div className="flex items-center justify-between">
+            <h3 className="font-black">{editingId ? "イベントを編集" : "イベントを作成"}</h3>
+            <button type="button" onClick={closeForm} className="rounded-lg p-1 hover:bg-[#f1f3f1]" aria-label="閉じる"><X size={18} /></button>
+          </div>
           <input
             className="field"
             placeholder="イベント名"
@@ -715,20 +754,20 @@ export default function EventsPage() {
             value={description}
             onChange={(e) => setDescription(e.target.value)}
           />
-          <label className="flex gap-2 text-sm font-bold">
+          {!editingId && <label className="flex gap-2 text-sm font-bold">
             <input
               type="checkbox"
               checked={makeCurrent}
               onChange={(e) => setMakeCurrent(e.target.checked)}
             />
             作成後、現在のイベントにする
-          </label>
+          </label>}
           <button
             className="btn-primary"
             disabled={busy || !name || !start}
             onClick={create}
           >
-            {busy ? "保存中…" : "イベントを作成"}
+            {busy ? "保存中…" : editingId ? "変更を保存" : "イベントを作成"}
           </button>
         </section>
       )}
@@ -745,14 +784,14 @@ export default function EventsPage() {
       {/* ── View tabs: カレンダー / リスト ── */}
       <div className="mt-6 flex gap-1 rounded-xl bg-[#f1f3f1] p-1">
         <button
-          className={`flex-1 rounded-lg px-3 py-2 text-sm font-black transition ${view === "calendar" ? "bg-white shadow-sm" : "text-[#68746d]"}`}
+          className={`flex-1 whitespace-nowrap rounded-lg px-2 py-2 text-sm font-black transition ${view === "calendar" ? "bg-white shadow-sm" : "text-[#68746d]"}`}
           onClick={() => setView("calendar")}
         >
           <CalendarDays size={14} className="mr-1 inline" />
-          カレンダー
+          <span className="whitespace-nowrap">カレンダー</span>
         </button>
         <button
-          className={`flex-1 rounded-lg px-3 py-2 text-sm font-black transition ${view === "list" ? "bg-white shadow-sm" : "text-[#68746d]"}`}
+          className={`flex-1 whitespace-nowrap rounded-lg px-2 py-2 text-sm font-black transition ${view === "list" ? "bg-white shadow-sm" : "text-[#68746d]"}`}
           onClick={() => setView("list")}
         >
           リスト
@@ -763,7 +802,7 @@ export default function EventsPage() {
           )}
         </button>
         <button
-          className={`flex-1 rounded-lg px-3 py-2 text-sm font-black transition ${view === "bizcon" ? "bg-white shadow-sm" : "text-[#68746d]"}`}
+          className={`flex-1 whitespace-nowrap rounded-lg px-2 py-2 text-sm font-black transition ${view === "bizcon" ? "bg-white shadow-sm" : "text-[#68746d]"}`}
           onClick={() => setView("bizcon")}
         >
           <Trophy size={14} className="mr-1 inline" />
@@ -955,6 +994,16 @@ export default function EventsPage() {
                           削除
                         </button>
                       )}
+                      {data.canManage && (
+                        <button
+                          className="rounded-lg border border-[#cfe0d5] px-2 py-1 text-xs font-bold text-[#176b45] transition hover:bg-[#f1faf4]"
+                          disabled={busy}
+                          onClick={() => startEdit(e)}
+                        >
+                          <Pencil size={12} className="inline mr-1" />
+                          編集
+                        </button>
+                      )}
                     </div>
                   </div>
                   {/* Stats row */}
@@ -1001,6 +1050,7 @@ export default function EventsPage() {
           onClose={() => setSelectedEvent(null)}
           onSelect={selectLocal}
           onDelete={deleteEvent}
+          onEdit={startEdit}
           busy={busy}
         />
       )}
