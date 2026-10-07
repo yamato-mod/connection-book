@@ -7,7 +7,15 @@ import { isConfiguredValue } from "@/lib/env-config";
 // explicit draft workflow and also permits sending. No mailbox read/list scope is requested.
 export const GMAIL_SEND_SCOPE="https://www.googleapis.com/auth/gmail.compose";
 export const GOOGLE_MAIL_SCOPES=["openid","email",GMAIL_SEND_SCOPE] as const;
-export const GOOGLE_ORGANIZATION_SCOPES=[...GOOGLE_MAIL_SCOPES,"https://www.googleapis.com/auth/calendar.events.owned"] as const;
+// drive.file は「このアプリが作ったファイルだけ」を扱える一番狭いドライブ権限。バックアップの保存に使う。
+export const DRIVE_FILE_SCOPE="https://www.googleapis.com/auth/drive.file";
+export const GOOGLE_ORGANIZATION_SCOPES=[...GOOGLE_MAIL_SCOPES,"https://www.googleapis.com/auth/calendar.events.owned",DRIVE_FILE_SCOPE] as const;
+
+/** 接続時に許可されたスコープに、必要なものが入っていないか。 */
+export function isGoogleConnectionScopeMissing(scopes:string[]|null|undefined,scope:string){return !(scopes??[]).includes(scope)}
+
+/** 組織Googleアカウントのドライブ（drive.file の範囲だけ）。 */
+export function organizationDrive(refreshToken:string){return google.drive({version:"v3",auth:oauth(refreshToken)})}
 
 export function createGoogleOAuthClient(){
   const clientId=process.env.GOOGLE_CLIENT_ID,clientSecret=process.env.GOOGLE_CLIENT_SECRET,redirectUri=process.env.GOOGLE_REDIRECT_URI;
