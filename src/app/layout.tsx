@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { AppShell } from "@/components/app-shell";
 import { ServiceWorkerRegistration } from "@/components/service-worker-registration";
+import { UpdateBanner } from "@/components/update-banner";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -18,7 +19,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       lang="ja"
       className="h-full antialiased"
     >
-      <body className="min-h-full"><ServiceWorkerRegistration /><AppShell>{children}</AppShell></body>
+      <body className="min-h-full"><ServiceWorkerRegistration /><AppShell>{children}</AppShell><UpdateBanner /></body>
     </html>
   );
 }

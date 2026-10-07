@@ -8,6 +8,8 @@ const lanDevOrigins = Object.values(networkInterfaces())
 
 const nextConfig: NextConfig = {
   poweredByHeader: false,
+  // 画面に焼き込むバージョン。/api/version と比べて、新しいバージョンが出たら更新を案内する。
+  env: { NEXT_PUBLIC_BUILD_ID: process.env.VERCEL_GIT_COMMIT_SHA ?? "dev" },
   allowedDevOrigins: lanDevOrigins,
   async headers() {
     return [{ source: "/(.*)", headers: [
