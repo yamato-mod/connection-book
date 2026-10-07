@@ -2,6 +2,8 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect } from "react";
+import { prefetchAppData } from "@/lib/use-app-data";
 import { CalendarDays, Home, ScanLine, Settings, Users } from "lucide-react";
 
 const nav = [
@@ -14,6 +16,13 @@ const nav = [
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const path = usePathname();
+  // アプリを開いたら、各タブのデータを裏で先に読んでおく（タブを切り替えたときにすぐ出せるように）。
+  const inApp = !path.startsWith("/start");
+  useEffect(() => {
+    if (!inApp) return;
+    const timer = setTimeout(() => prefetchAppData(["/api/app?view=bulletin", "/api/app?view=contacts&q=", "/api/events", "/api/app?view=settings"]), 800);
+    return () => clearTimeout(timer);
+  }, [inApp]);
   if(path.startsWith("/start"))return <div className="min-h-screen bg-[#f4f7f4]"><header className="border-b border-[#dce4de] bg-white"><Link href="/start" className="mx-auto flex h-16 max-w-xl items-center gap-3 px-4" aria-label="つながり帳 はじめる"><span className="grid size-9 place-items-center rounded-xl bg-[#176b45] text-white"><ScanLine size={20}/></span><span><span className="block text-[11px] font-bold tracking-[.12em] text-[#176b45]">ORGANIZATION CRM</span><span className="block text-lg font-black leading-5">つながり帳</span></span></Link></header>{children}</div>;
   return (
     <div className="min-h-screen pb-24 md:pb-8">
