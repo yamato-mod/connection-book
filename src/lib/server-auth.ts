@@ -1,11 +1,16 @@
 import "server-only";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { AccessRole } from "@/lib/organization-mail";
+import { membershipGate } from "@/lib/membership";
 
 export async function requireMember(request: Request){
   const {supabase,user}=await requireUser(request);
-  const {data:member}=await supabase.from("members").select("id, club_id, name, role, signature, is_admin, access_role, selected_event_id").eq("auth_user_id",user.id).eq("is_active",true).single();
-  if(!member) throw jsonAuthError("member_required","このアカウントはまだ団体に所属していません。団体を作成するか、幹部からの招待を確認してください。",403);
+  const {data:member}=await supabase.from("members").select("id, club_id, name, role, signature, is_admin, access_role, position, status, suspended_until, library_access, selected_event_id").eq("auth_user_id",user.id).maybeSingle();
+  if(!member) throw jsonAuthError("member_required","このアカウントはまだ団体に所属していません。団体を作成するか、招待コードから入部を申請してください。",403);
+  const gate=membershipGate(member);
+  if(!gate.ok) throw jsonAuthError(gate.error,gate.message,403);
+  // 期限付きの活動停止が明けたら自動で在籍に戻す（第35条: 30日以内の一時制限）。
+  if(member.status==="suspended"){await supabase.from("members").update({status:"active",status_reason:"",updated_at:new Date().toISOString()}).eq("id",member.id);member.status="active";}
   return {supabase,user,member};
 }
 

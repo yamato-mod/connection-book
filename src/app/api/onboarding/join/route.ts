@@ -39,63 +39,54 @@ export async function POST(request: Request) {
         { status: 404 },
       );
 
-    // Check if already a member
+    // 第7条: 招待コードでの入部は「申請」。代表または幹部が承認するまで何も見られない。
     const { data: existing } = await supabase
       .from("members")
-      .select("id, is_active")
+      .select("id, status")
       .eq("club_id", club.id)
       .eq("auth_user_id", user.id)
       .maybeSingle();
 
-    if (existing?.is_active)
-      return Response.json(
-        { error: "already_member", message: "すでにこの団体に所属しています。" },
-        { status: 409 },
-      );
+    if (existing?.status === "active" || existing?.status === "on_leave")
+      return Response.json({ error: "already_member", message: "すでにこの団体に所属しています。" }, { status: 409 });
+    if (existing?.status === "pending")
+      return Response.json({ ok: true, pending: true, organizationName: club.name }, { headers: { "Cache-Control": "no-store" } });
+    // 活動停止中の人が招待コードで自分の権限を戻すことはできない（第35・36条）。
+    if (existing?.status === "suspended")
+      return Response.json({ error: "membership_suspended", message: "現在、利用が一時停止されています。代表または副代表に確認してください。" }, { status: 403 });
 
-    // Re-activate if previously deactivated, otherwise create new member
-    if (existing && !existing.is_active) {
-      const { error } = await supabase
-        .from("members")
-        .update({
-          name,
-          role: title,
-          signature: `${name}\n${title}`.trim(),
-          signature_display_name: name,
-          is_active: true,
-          access_role: "member",
-          is_admin: false,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", existing.id);
-      if (error) throw error;
-    } else {
-      const { error } = await supabase.from("members").insert({
-        club_id: club.id,
-        auth_user_id: user.id,
-        name,
-        role: title,
-        signature: `${name}\n${title}`.trim(),
-        signature_display_name: name,
-        access_role: "member",
-        is_admin: false,
-        is_active: true,
-      });
-      if (error) throw error;
-    }
+    const application = {
+      name,
+      role: title,
+      signature: `${name}\n${title}`.trim(),
+      signature_display_name: name,
+      access_role: "member",
+      status: "pending",
+      status_reason: "",
+      contact_email: user.email ?? "",
+      library_access: false,
+      joined_at: null,
+      left_at: null,
+      updated_at: new Date().toISOString(),
+    };
+    // 退部した人の再入部も、もう一度承認を受ける（第11条）。
+    const { error } = existing
+      ? await supabase.from("members").update(application).eq("id", existing.id)
+      : await supabase.from("members").insert({ ...application, club_id: club.id, auth_user_id: user.id });
+    if (error) throw error;
 
     // Audit log
     await supabase.from("audit_logs").insert({
       club_id: club.id,
       actor_member_id: null,
-      action: "member_self_joined",
+      action: "member_join_requested",
       entity_type: "club",
       entity_id: club.id,
       metadata: { auth_user_id: user.id, invite_code: inviteCode },
     });
 
     return Response.json(
-      { ok: true, organizationName: club.name },
+      { ok: true, pending: true, organizationName: club.name },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {
