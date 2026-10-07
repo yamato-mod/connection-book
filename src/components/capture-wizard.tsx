@@ -5,7 +5,7 @@ import { ChangeEvent, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { AlertTriangle, ArrowLeft, Camera, Check, ChevronRight, FilePenLine, LoaderCircle, Mail, Pencil, Save, ScanSearch, ShieldCheck, UserRoundCheck, X, Zap } from "lucide-react";
-import { Classification, ContactInput, contactSchema, quickContactSchema, DuplicateCandidate, renderTemplate } from "@/lib/domain";
+import { Classification, ContactInput, contactSchema, quickContactSchema, DuplicateCandidate, MergeMode, renderTemplate } from "@/lib/domain";
 import { EmailCandidate, tesseractProvider } from "@/lib/ocr";
 import { cropImageRegion, NormalizedRect, preprocessBusinessCardImage, rotateImage } from "@/lib/image-processing";
 import { createClient } from "@/lib/supabase/browser";
@@ -13,7 +13,7 @@ import { appFetch, sha256Hex } from "@/lib/client-api";
 import { createClientId } from "@/lib/client-crypto";
 import { useAppData } from "@/lib/use-app-data";
 import { EmailRegionSelector } from "@/components/email-region-selector";
-import { enforcedCc, senderModeForRole, type AccessRole, type MailSettings } from "@/lib/organization-mail";
+import { enforcedCc, type AccessRole, type MailSettings, type SenderStatus } from "@/lib/organization-mail";
 
 type Step = "capture" | "verify" | "duplicate" | "mail" | "done";
 const blank: ContactInput = { name: "", company: "", role: "", email: "", phone: "", address: "", website: "", notes: "" };
@@ -50,8 +50,10 @@ export function CaptureWizard() {
   const [disableOrganizationCc,setDisableOrganizationCc]=useState(false);
   const [saving,setSaving]=useState(false);
   const [duplicates, setDuplicates] = useState<DuplicateCandidate[]>([]);
+  // How to handle a card for someone already in the library: merge into an existing contact, or register as a different person.
+  const [mergeChoice, setMergeChoice] = useState<{targetContactId:string;mode:MergeMode}|"new"|null>(null);
   const context = useAppData<{member:{signature:string};currentEvent:{id:string;name:string}|null}>("/api/app?view=dashboard");
-  const settings = useAppData<{member:{access_role:AccessRole;signature:string};mailSettings:MailSettings;organizationGoogle:{google_email:string;status:string}|null;userGoogle:{google_email:string;status:string}|null;templates:Array<{id:string;name:string;default_subject:string;default_body:string;is_default:boolean}>}>("/api/app?view=settings");
+  const settings = useAppData<{member:{access_role:AccessRole;signature:string};sender:SenderStatus;mailSettings:MailSettings;organizationGoogle:{google_email:string;status:string}|null;userGoogle:{google_email:string;status:string}|null;templates:Array<{id:string;name:string;default_subject:string;default_body:string;is_default:boolean}>}>("/api/app?view=settings");
 
   useEffect(() => {
     if (quickMode) return; // no draft restore in quick mode
@@ -61,8 +63,10 @@ export function CaptureWizard() {
   useEffect(() => { if (step !== "done" && !quickMode) localStorage.setItem("connection-book-capture-draft", JSON.stringify(contact)); }, [contact, step, quickMode]);
 
   const strongDuplicate = duplicates.find((item) => item.strength === "strong");
-  const senderMode=settings.data?senderModeForRole(settings.data.member.access_role,settings.data.mailSettings):"organization_email";
-  const fromEmail=senderMode==="organization_email"?settings.data?.organizationGoogle?.google_email:settings.data?.userGoogle?.google_email;
+  // The server decides the sender (same logic as /api/gmail/send), so this screen can never disagree with what actually happens on send.
+  const sender=settings.data?.sender;
+  const senderView:SenderView=settings.loading&&!settings.data?{label:"確認中…",ready:false,notice:null}:settings.error?{label:"確認できません",ready:false,notice:`送信元の接続状態を読み込めませんでした（${settings.error}）。通信を確認して再読み込みしてください。`}:!sender?{label:"確認できません",ready:false,notice:"送信元の接続状態を取得できませんでした。再読み込みしてください。"}:senderNotice(sender);
+  useEffect(()=>{ if(step==="mail") void settings.reload(); /* pick up a Google connection made in another tab */ },[step]); // eslint-disable-line react-hooks/exhaustive-deps
   const requestedCc=emailsFromInput(ccInput),requestedBcc=emailsFromInput(bccInput);
   const finalCc=settings.data?enforcedCc({role:settings.data.member.access_role,settings:settings.data.mailSettings,organizationEmail:settings.data.organizationGoogle?.google_email??null,requestedCc,disableOrganizationCc}):requestedCc;
 
@@ -140,13 +144,11 @@ export function CaptureWizard() {
     if (!parsed.success) { setError(parsed.error.issues[0]?.message ?? "入力内容を確認してください"); return; }
     setError("");
 
-    if (quickMode) {
-      // Quick mode: skip duplicate check, go straight to save
-      await quickSave();
-      return;
-    }
-
-    try { const result=await appFetch<{duplicates:DuplicateCandidate[]}>("/api/contacts/duplicates",{method:"POST",body:JSON.stringify({name:contact.name,company:contact.company,email:contact.email,phone:contact.phone})});setDuplicates(result.duplicates);setStep("duplicate"); }
+    setMergeChoice(null);
+    try { const result=await appFetch<{duplicates:DuplicateCandidate[]}>("/api/contacts/duplicates",{method:"POST",body:JSON.stringify({name:contact.name,company:contact.company,email:contact.email,phone:contact.phone})});setDuplicates(result.duplicates);
+      // Quick mode stays quick when there is nothing to decide.
+      if (quickMode && !result.duplicates.some(x=>x.contactId)) { await quickSave(); return; }
+      setStep("duplicate"); }
     catch(cause){setError(cause instanceof Error?cause.message:"部全体の重複履歴を照合できませんでした。");}
   }
 
@@ -166,7 +168,7 @@ export function CaptureWizard() {
   async function persistContact() {
     if(!ocrImage)throw new Error("名刺画像がありません。撮影からやり直してください。");
     const form=new FormData();const file=new File([ocrImage],`business-card-${Date.now()}.jpg`,{type:ocrImage.type||"image/jpeg"});
-    form.set("image",file);form.set("metadata",JSON.stringify({contact,classification,eventId:context.data?.currentEvent?.id??null,rawText,ocrCorrected:emailCandidates.some(x=>x.source==="corrected"),imageSha256:await sha256Hex(ocrImage),quickMode}));
+    form.set("image",file);form.set("metadata",JSON.stringify({contact,classification,eventId:context.data?.currentEvent?.id??null,rawText,ocrCorrected:emailCandidates.some(x=>x.source==="corrected"),imageSha256:await sha256Hex(ocrImage),quickMode,merge:mergeChoice&&mergeChoice!=="new"?mergeChoice:null}));
     const result=await appFetch<{contactId:string;statuses:{drive:string;people:string}}>("/api/contacts/register",{method:"POST",body:form});
     if(result.statuses.drive==="failed"||result.statuses.people==="failed")setError("CRM登録は完了しましたが、一部のGoogle連携に失敗しました。人物詳細で状態を確認してください。");
     return result.contactId;
@@ -174,7 +176,9 @@ export function CaptureWizard() {
 
   async function continueAfterDuplicate() {
     if(saving)return;
-    if (strongDuplicate && !overrideReason) return;
+    if (duplicates.some(x=>x.contactId) && !mergeChoice) { setError("既に登録されている名刺の扱い（上書き・併記・別人として登録）を選んでください。"); return; }
+    if (quickMode) { await quickSave(); return; }
+    if (strongDuplicate && classification==="courtesy" && !overrideReason) return;
     if((classification==="important"||classification==="courtesy")&&!settings.data?.templates.some(x=>x.is_default)){setError("デフォルトのメールテンプレートが未設定です。設定画面で作成してから登録してください。");return}
     setSaving(true);
     try {
@@ -205,7 +209,7 @@ export function CaptureWizard() {
       if (!confirmation.ok) {const payload=await confirmation.json().catch(()=>({}));throw new Error(payload.error==="contact_state_changed"?"確認後に宛先または分類が変更されました。名刺情報へ戻って再確認してください。":confirmation.status===401?"セッション期限が切れました。再ログインしてください。":"宛先の再確認に失敗しました。名刺情報へ戻って確認してください。");}
       const { token } = await confirmation.json();
       const template=settings.data?.templates.find(x=>x.is_default);const result = await fetch("/api/gmail/send", { method: "POST", headers, body: JSON.stringify({ contactId, recipientEmail: contact.email, cc:requestedCc, bcc:requestedBcc, disableOrganizationCc, subject, body, templateId: template?.id??null, eventId: context.data?.currentEvent?.id??null, classification: "courtesy", confirmedRecipient: true, confirmationToken: token, idempotencyKey: sendKey, duplicateOverride: Boolean(strongDuplicate), duplicateOverrideReason: strongDuplicate ? overrideReason : null }) });
-      if (!result.ok) {const payload=await result.json().catch(()=>({}));const messages:Record<string,string>={recipient_confirmation_expired:"宛先確認の有効期限が切れました。もう一度確認してください。",contact_state_changed:"確認後に宛先または分類が変更されたため送信を拒否しました。",duplicate_submission:"同じ送信操作は既に処理されています。送信履歴を確認してください。",organization_google_not_connected:"組織Googleアカウントが未接続です。設定画面で接続してください。",user_google_not_connected:"個人Googleアカウントが未接続です。設定画面で接続してください。",send_failed:"Gmail送信に失敗しました。送信済み履歴を確認してから再操作してください。"};throw new Error(messages[payload.error]??payload.message??"送信できませんでした。履歴を確認してから再操作してください。");}
+      if (!result.ok) {const payload=await result.json().catch(()=>({}));const messages:Record<string,string>={recipient_confirmation_expired:"宛先確認の有効期限が切れました。もう一度確認してください。",contact_state_changed:"確認後に宛先または分類が変更されたため送信を拒否しました。",duplicate_submission:"同じ送信操作は既に処理されています。送信履歴を確認してください。",organization_google_not_connected:"組織Googleアカウントが未接続です。設定画面で接続してください。",user_google_not_connected:"個人Googleアカウントが未接続です。設定画面で接続してください。",organization_google_reauth_required:"組織Googleアカウントの接続が切れています。管理者が設定画面で「再接続」してください。（まだ送信されていません）",user_google_reauth_required:"個人Googleアカウントの接続が切れています。設定画面で「再接続」してください。（まだ送信されていません）",send_failed:"Gmail送信に失敗しました。送信済み履歴を確認してから再操作してください。"};if(String(payload.error).endsWith("_google_reauth_required")||String(payload.error).endsWith("_google_not_connected"))void settings.reload();throw new Error(messages[payload.error]??payload.message??"送信できませんでした。履歴を確認してから再操作してください。");}
       localStorage.removeItem("connection-book-capture-draft"); setStep("done");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "送信できませんでした。"); }finally{setSending(false)}
   }
@@ -230,8 +234,8 @@ export function CaptureWizard() {
           onReadRegion={reOcrRegion} onRotate={rotate} onBack={() => setStep("capture")} onVerify={verify}
         />
     )}
-    {step === "duplicate" && <DuplicateStep contact={contact} duplicate={strongDuplicate} reason={overrideReason} saving={saving} setReason={setOverrideReason} onBack={() => setStep("verify")} onContinue={continueAfterDuplicate}/>}
-    {step === "mail" && <MailStep contact={contact} fromEmail={fromEmail??"未接続"} ccInput={ccInput} setCcInput={setCcInput} finalCc={finalCc} bccInput={bccInput} setBccInput={setBccInput} templateName={settings.data?.templates.find(x=>x.is_default)?.name??"未設定"} signature={settings.data?.member.signature??context.data?.member.signature??""} canDisableOrganizationCc={Boolean(settings.data?.member.access_role==="member"&&settings.data.mailSettings.auto_cc_organization_email&&settings.data.mailSettings.allow_member_to_disable_cc)} disableOrganizationCc={disableOrganizationCc} setDisableOrganizationCc={setDisableOrganizationCc} subject={subject} setSubject={setSubject} body={body} setBody={setBody} confirmed={confirmed} setConfirmed={setConfirmed} error={error} sending={sending} onBack={() => setStep("verify")} onSend={send}/>}
+    {step === "duplicate" && <DuplicateStep contact={contact} duplicates={duplicates} mergeChoice={mergeChoice} setMergeChoice={(value)=>{setMergeChoice(value);setError("")}} askReason={Boolean(strongDuplicate)&&classification==="courtesy"&&!quickMode} reason={overrideReason} saving={saving} error={error} setReason={setOverrideReason} onBack={() => setStep("verify")} onContinue={continueAfterDuplicate}/>}
+    {step === "mail" && <MailStep contact={contact} sender={senderView} onRetrySender={()=>void settings.reload()} ccInput={ccInput} setCcInput={setCcInput} finalCc={finalCc} bccInput={bccInput} setBccInput={setBccInput} templateName={settings.data?.templates.find(x=>x.is_default)?.name??"未設定"} signature={settings.data?.member.signature??context.data?.member.signature??""} canDisableOrganizationCc={Boolean(settings.data?.member.access_role==="member"&&settings.data.mailSettings.auto_cc_organization_email&&settings.data.mailSettings.allow_member_to_disable_cc)} disableOrganizationCc={disableOrganizationCc} setDisableOrganizationCc={setDisableOrganizationCc} subject={subject} setSubject={setSubject} body={body} setBody={setBody} confirmed={confirmed} setConfirmed={setConfirmed} error={error} sending={sending} onBack={() => setStep("verify")} onSend={send}/>}
     {step === "done" && <DoneStep classification={classification} contactId={contactId} quickMode={quickMode}/>}
   </div>;
 }
@@ -241,7 +245,7 @@ function Header({ classification, quickMode }: { classification: Exclude<Classif
   return <div className="mb-6 flex items-center justify-between"><div><p className="eyebrow">Business card intake</p><h1 className="text-2xl font-black">名刺を1枚登録</h1></div><span className={`rounded-full px-3 py-1.5 text-sm font-black ${meta[classification as "important"|"courtesy"]?.tone ?? "bg-[#ececf4] text-[#5d6279]"}`}>{meta[classification as "important"|"courtesy"]?.label ?? "未処理"}</span></div>;
 }
 
-function QuickSteps({ step }: { step: Step }) { const current = ["capture", "verify", "done"].indexOf(step === "duplicate" || step === "mail" ? "done" : step); return <ol className="mb-6 grid grid-cols-3 gap-2 text-center text-[11px] font-bold text-[#7c867f]">{["1 撮影", "2 確認", "3 完了"].map((label, index) => <li key={label} className={`border-b-4 pb-2 ${current >= index ? "border-[#4338ca] text-[#4338ca]" : "border-[#dce4de]"}`}>{label}</li>)}</ol>; }
+function QuickSteps({ step }: { step: Step }) { const current = ["capture", "verify", "done"].indexOf(step === "duplicate" ? "verify" : step === "mail" ? "done" : step); return <ol className="mb-6 grid grid-cols-3 gap-2 text-center text-[11px] font-bold text-[#7c867f]">{["1 撮影", "2 確認", "3 完了"].map((label, index) => <li key={label} className={`border-b-4 pb-2 ${current >= index ? "border-[#4338ca] text-[#4338ca]" : "border-[#dce4de]"}`}>{label}</li>)}</ol>; }
 function Steps({ step }: { step: Step }) { const current = ["capture", "verify", "duplicate", "mail", "done"].indexOf(step); return <ol className="mb-6 grid grid-cols-4 gap-2 text-center text-[11px] font-bold text-[#7c867f]">{["1 撮影", "2 内容確認", "3 重複確認", "4 処理確定"].map((label, index) => <li key={label} className={`border-b-4 pb-2 ${current >= index ? "border-[#176b45] text-[#176b45]" : "border-[#dce4de]"}`}>{label}</li>)}</ol>; }
 
 function CaptureStep({ progress, error, onFile, quickMode }: { progress?: number; error: string; onFile: (event: ChangeEvent<HTMLInputElement>) => void; quickMode: boolean }) {
@@ -300,10 +304,34 @@ function VerifyStep(props: VerifyProps) {
   </section>;
 }
 
-function DuplicateStep({ contact, duplicate, reason, saving, setReason, onBack, onContinue }: { contact: ContactInput; duplicate?:DuplicateCandidate; reason: string;saving:boolean; setReason: (value: string) => void; onBack: () => void; onContinue: () => void }) { return <section className="card p-5 md:p-7"><h2 className="text-xl font-black">部全体の履歴を確認</h2>{duplicate ? <div className="mt-4 rounded-2xl border-2 border-[#dc9b35] bg-[#fff6df] p-5"><div className="flex gap-3"><AlertTriangle className="shrink-0 text-[#a25c00]"/><div><strong>同じ人物の可能性があります</strong><p className="mt-2 text-sm">{duplicate.senderName?`${duplicate.senderName}さんが`:"部内で"}{duplicate.sentAt?`${new Intl.DateTimeFormat("ja-JP").format(new Date(duplicate.sentAt))}に`:"過去に"} <strong>{contact.email}</strong> を登録しています。{duplicate.eventName&&`（${duplicate.eventName}）`}</p></div></div><label className="label mt-5">それでも送信する理由<select className="field" value={reason} onChange={(event) => setReason(event.target.value)}><option value="">理由を選択</option><option>再会した</option><option>別イベント</option><option>担当交代</option><option>再送依頼</option><option>その他</option></select></label></div> : <div className="mt-4 flex gap-3 rounded-2xl bg-[#e8f6ed] p-5 text-[#176b45]"><UserRoundCheck/><div><strong>重複候補は見つかりませんでした</strong><p className="mt-1 text-sm">部全体の履歴を照合しました。</p></div></div>}<div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-between"><button className="btn-secondary" disabled={saving} onClick={onBack}><ArrowLeft size={18}/>名刺情報に戻る</button><div className="flex gap-2"><Link href="/" className="btn-danger"><X size={18}/>登録をやめる</Link><button className="btn-primary" disabled={saving||(Boolean(duplicate)&&!reason)} onClick={onContinue}>{saving?"保存・連携中…":<>次へ<ChevronRight size={18}/></>}</button></div></div></section>; }
+const fieldLabels:Array<[keyof ContactInput & keyof NonNullable<DuplicateCandidate["existing"]>,string]>=[["name","氏名"],["company","会社・団体"],["role","役職"],["email","メール"],["phone","電話"],["address","住所"],["website","Web"]];
+const reasonLabel:Record<DuplicateCandidate["reason"],string>={email:"メールアドレスが一致",phone:"電話番号が一致",name_company:"氏名と所属が一致"};
+type DuplicateProps={contact:ContactInput;duplicates:DuplicateCandidate[];mergeChoice:{targetContactId:string;mode:MergeMode}|"new"|null;setMergeChoice:(value:{targetContactId:string;mode:MergeMode}|"new")=>void;askReason:boolean;reason:string;saving:boolean;error:string;setReason:(value:string)=>void;onBack:()=>void;onContinue:()=>void};
+function DuplicateStep(props:DuplicateProps){
+  const candidates=props.duplicates.filter(x=>x.contactId&&x.existing);
+  const choice=props.mergeChoice;
+  const isChosen=(id:string,mode:MergeMode)=>choice!==null&&choice!=="new"&&choice.targetContactId===id&&choice.mode===mode;
+  const option=(checked:boolean,onChange:()=>void,title:string,detail:string,disabled=false)=><label className={`flex items-start gap-3 rounded-xl border-2 p-3 ${disabled?"cursor-not-allowed opacity-60":"cursor-pointer"} ${checked?"border-[#176b45] bg-[#eef7f1]":"border-[#dce4de] bg-white"}`}><input type="radio" className="mt-1 size-4 accent-[#176b45]" checked={checked} disabled={disabled} onChange={onChange}/><span><strong className="block text-sm">{title}</strong><span className="text-xs text-[#5f6b64]">{detail}</span></span></label>;
+  return <section className="card p-5 md:p-7"><h2 className="text-xl font-black">部全体の履歴を確認</h2>
+  {candidates.length?<div className="mt-4 grid gap-4">
+    <div className="flex gap-3 rounded-2xl border-2 border-[#dc9b35] bg-[#fff6df] p-4"><AlertTriangle className="shrink-0 text-[#a25c00]"/><div><strong>この人はすでに名刺ライブラリに登録されている可能性があります</strong><p className="mt-1 text-sm">同じ人を二重に登録しないよう、どう保存するか選んでください。</p></div></div>
+    {candidates.map(candidate=>{const existing=candidate.existing!,id=candidate.contactId!;return <div key={id} className="rounded-2xl border p-4">
+      <p className="text-sm"><strong>{existing.name}</strong>（{existing.company||"所属なし"}）<span className="ml-2 rounded-full bg-[#f3f6f4] px-2 py-0.5 text-xs font-bold">{reasonLabel[candidate.reason]}</span></p>
+      {candidate.sentAt&&<p className="mt-1 text-xs text-[#6d7871]">{candidate.senderName?`${candidate.senderName}さんが`:""}{new Intl.DateTimeFormat("ja-JP").format(new Date(candidate.sentAt))}にお礼メールを送信済み{candidate.eventName&&`（${candidate.eventName}）`}</p>}
+      <div className="mt-3 overflow-x-auto"><table className="w-full min-w-[420px] text-left text-xs"><thead className="text-[#748078]"><tr><th className="p-1.5">項目</th><th className="p-1.5">登録済み</th><th className="p-1.5">今回の名刺</th></tr></thead><tbody>{fieldLabels.map(([key,label])=>{const before=existing[key]??"",after=props.contact[key]??"";const changed=Boolean(after.trim())&&after.trim()!==before.trim();return <tr key={key} className="border-t"><td className="p-1.5 font-bold">{label}</td><td className="p-1.5 break-all">{before||"—"}</td><td className={`p-1.5 break-all ${changed?"font-bold text-[#a25c00]":""}`}>{after||"—"}</td></tr>})}</tbody></table></div>
+      <div className="mt-3 grid gap-2">
+        {option(isChosen(id,"overwrite"),()=>props.setMergeChoice({targetContactId:id,mode:"overwrite"}),"上書き保存",candidate.canOverwrite===false?"上書きできるのは、この名刺を登録した人と管理者だけです。":"今回の名刺の内容で更新します（空欄の項目は登録済みの値を残します）。",candidate.canOverwrite===false)}
+        {option(isChosen(id,"append"),()=>props.setMergeChoice({targetContactId:id,mode:"append"}),"併記して保存","登録済みの内容はそのままに、違う部分を「別の名刺の情報」としてメモに残します。")}
+      </div></div>})}
+    {option(choice==="new",()=>props.setMergeChoice("new"),"別人として新規登録","同姓同名など、登録済みの人とは別人の場合に選びます。")}
+  </div>:<div className="mt-4 flex gap-3 rounded-2xl bg-[#e8f6ed] p-5 text-[#176b45]"><UserRoundCheck/><div><strong>重複候補は見つかりませんでした</strong><p className="mt-1 text-sm">部全体の履歴を照合しました。</p></div></div>}
+  {props.askReason&&<label className="label mt-5">同じメールアドレスへ再度お礼メールを送る理由<select className="field" value={props.reason} onChange={(event)=>props.setReason(event.target.value)}><option value="">理由を選択</option><option>再会した</option><option>別イベント</option><option>担当交代</option><option>再送依頼</option><option>その他</option></select></label>}
+  {props.error&&<ErrorMessage>{props.error}</ErrorMessage>}
+  <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-between"><button className="btn-secondary" disabled={props.saving} onClick={props.onBack}><ArrowLeft size={18}/>名刺情報に戻る</button><div className="flex gap-2"><Link href="/" className="btn-danger"><X size={18}/>登録をやめる</Link><button className="btn-primary" disabled={props.saving||(candidates.length>0&&!choice)||(props.askReason&&!props.reason)} onClick={props.onContinue}>{props.saving?"保存・連携中…":<>保存して次へ<ChevronRight size={18}/></>}</button></div></div></section>;
+}
 
-type MailProps = { contact: ContactInput;fromEmail:string;ccInput:string;setCcInput:(value:string)=>void;finalCc:string[];bccInput:string;setBccInput:(value:string)=>void;templateName:string;signature:string;canDisableOrganizationCc:boolean;disableOrganizationCc:boolean;setDisableOrganizationCc:(value:boolean)=>void;subject: string; setSubject: (value:string)=>void; body:string; setBody:(value:string)=>void; confirmed:boolean; setConfirmed:(value:boolean)=>void; error:string;sending:boolean; onBack:()=>void; onSend:()=>void };
-function MailStep(props: MailProps) { return <section className="card p-5 md:p-7"><div className="flex items-start gap-3"><Mail className="mt-1 text-[#176b45]"/><div><h2 className="text-xl font-black">お礼メールを編集・最終確認</h2><p className="mt-1 text-sm text-[#6d7871]">From・To・CC・BCCを含め、送信内容を確認してください。</p></div></div><div className="my-5 grid gap-2 rounded-2xl border-2 border-[#cf5a50] bg-[#fff4f2] p-5 text-sm"><p><strong>From：</strong><span className="break-all">{props.fromEmail}</span></p><p><strong>To：</strong><span className="break-all text-[#9f2f28]">{props.contact.email}</span></p><p><strong>CC：</strong><span className="break-all">{props.finalCc.join(", ")||"なし"}</span></p><p><strong>BCC：</strong><span className="break-all">{emailsFromInput(props.bccInput).join(", ")||"なし"}</span></p><p><strong>テンプレート：</strong>{props.templateName}</p><p className="whitespace-pre-wrap"><strong>署名：</strong>{props.signature||"未設定"}</p></div><div className="grid gap-4"><label className="label">CC（複数はカンマ区切り）<input className="field" value={props.ccInput} onChange={(event)=>props.setCcInput(event.target.value)}/></label>{props.canDisableOrganizationCc&&<label className="flex items-center gap-2 text-sm font-bold"><input type="checkbox" checked={props.disableOrganizationCc} onChange={(event)=>props.setDisableOrganizationCc(event.target.checked)}/>組織代表メールの自動CCを外す</label>}<label className="label">BCC（複数はカンマ区切り）<input className="field" value={props.bccInput} onChange={(event)=>props.setBccInput(event.target.value)}/></label><label className="label">件名<input className="field" value={props.subject} onChange={(event)=>props.setSubject(event.target.value)}/></label><label className="label">本文<textarea className="field min-h-64 leading-7" value={props.body} onChange={(event)=>props.setBody(event.target.value)}/></label><label className="flex cursor-pointer items-start gap-3 rounded-xl border-2 p-4"><input className="mt-1 size-5 accent-[#176b45]" type="checkbox" checked={props.confirmed} onChange={(event)=>props.setConfirmed(event.target.checked)}/><span className="text-sm font-bold">名刺原本と照らし合わせ、From・To・CC・BCCと送信本文を確認しました</span></label></div>{props.error&&<ErrorMessage>{props.error}</ErrorMessage>}<div className="mt-6 grid gap-3 sm:grid-cols-3"><button className="btn-secondary" disabled={props.sending} onClick={props.onBack}>名刺を修正</button><Link href="/" className="btn-danger">送信しない</Link><button className="btn-primary" disabled={props.sending||!props.confirmed||props.fromEmail==="未接続"||!props.subject.trim()||!props.body.trim()} onClick={props.onSend}><Mail size={18}/>{props.sending?"Gmail送信中…":"確認した内容で送信"}</button></div></section>; }
+type MailProps = { contact: ContactInput;sender:SenderView;onRetrySender:()=>void;ccInput:string;setCcInput:(value:string)=>void;finalCc:string[];bccInput:string;setBccInput:(value:string)=>void;templateName:string;signature:string;canDisableOrganizationCc:boolean;disableOrganizationCc:boolean;setDisableOrganizationCc:(value:boolean)=>void;subject: string; setSubject: (value:string)=>void; body:string; setBody:(value:string)=>void; confirmed:boolean; setConfirmed:(value:boolean)=>void; error:string;sending:boolean; onBack:()=>void; onSend:()=>void };
+function MailStep(props: MailProps) { return <section className="card p-5 md:p-7"><div className="flex items-start gap-3"><Mail className="mt-1 text-[#176b45]"/><div><h2 className="text-xl font-black">お礼メールを編集・最終確認</h2><p className="mt-1 text-sm text-[#6d7871]">From・To・CC・BCCを含め、送信内容を確認してください。</p></div></div><div className="my-5 grid gap-2 rounded-2xl border-2 border-[#cf5a50] bg-[#fff4f2] p-5 text-sm"><p><strong>From：</strong><span className={`break-all ${props.sender.ready?"":"font-bold text-[#a93830]"}`}>{props.sender.label}</span></p><p><strong>To：</strong><span className="break-all text-[#9f2f28]">{props.contact.email}</span></p><p><strong>CC：</strong><span className="break-all">{props.finalCc.join(", ")||"なし"}</span></p><p><strong>BCC：</strong><span className="break-all">{emailsFromInput(props.bccInput).join(", ")||"なし"}</span></p><p><strong>テンプレート：</strong>{props.templateName}</p><p className="whitespace-pre-wrap"><strong>署名：</strong>{props.signature||"未設定"}</p></div>{props.sender.notice&&<div role="alert" className="mb-5 grid gap-3 rounded-xl border border-[#cf5a50] bg-white p-4 text-sm"><p className="font-bold text-[#a93830]">{props.sender.notice}</p><div className="flex flex-wrap gap-2">{props.sender.settingsLink&&<Link href="/settings" className="btn-secondary">設定画面を開く</Link>}<button type="button" className="btn-secondary" onClick={props.onRetrySender}>接続状態を再確認</button></div></div>}<div className="grid gap-4"><label className="label">CC（複数はカンマ区切り）<input className="field" value={props.ccInput} onChange={(event)=>props.setCcInput(event.target.value)}/></label>{props.canDisableOrganizationCc&&<label className="flex items-center gap-2 text-sm font-bold"><input type="checkbox" checked={props.disableOrganizationCc} onChange={(event)=>props.setDisableOrganizationCc(event.target.checked)}/>組織代表メールの自動CCを外す</label>}<label className="label">BCC（複数はカンマ区切り）<input className="field" value={props.bccInput} onChange={(event)=>props.setBccInput(event.target.value)}/></label><label className="label">件名<input className="field" value={props.subject} onChange={(event)=>props.setSubject(event.target.value)}/></label><label className="label">本文<textarea className="field min-h-64 leading-7" value={props.body} onChange={(event)=>props.setBody(event.target.value)}/></label><label className="flex cursor-pointer items-start gap-3 rounded-xl border-2 p-4"><input className="mt-1 size-5 accent-[#176b45]" type="checkbox" checked={props.confirmed} onChange={(event)=>props.setConfirmed(event.target.checked)}/><span className="text-sm font-bold">名刺原本と照らし合わせ、From・To・CC・BCCと送信本文を確認しました</span></label></div>{props.error&&<ErrorMessage>{props.error}</ErrorMessage>}<div className="mt-6 grid gap-3 sm:grid-cols-3"><button className="btn-secondary" disabled={props.sending} onClick={props.onBack}>名刺を修正</button><Link href="/" className="btn-danger">送信しない</Link><button className="btn-primary" disabled={props.sending||!props.confirmed||!props.sender.ready||!props.subject.trim()||!props.body.trim()} onClick={props.onSend}><Mail size={18}/>{props.sending?"Gmail送信中…":"確認した内容で送信"}</button></div></section>; }
 
 function emailsFromInput(value:string){return [...new Set(value.split(/[;,\n]/).map(item=>item.trim().toLowerCase()).filter(Boolean))]}
 
@@ -329,3 +357,12 @@ function DoneStep({ classification, contactId, quickMode }: { classification: Ex
 function Field({ label, value, onChange }: { label:string; value:string; onChange:(value:string)=>void }) { return <label className="label">{label}<input className="field" value={value} onChange={(event)=>onChange(event.target.value)}/></label>; }
 function Progress({ value }: { value:number }) { return <div className="mt-4"><LoaderCircle className="mx-auto animate-spin text-[#176b45]"/><p className="mt-1 text-center text-xs font-bold">OCR処理中 {value}%</p></div>; }
 function ErrorMessage({ children }: { children:React.ReactNode }) { return <div role="alert" className="mt-4 flex gap-2 rounded-xl bg-[#fff0ee] p-3 text-sm font-bold text-[#a93830]"><AlertTriangle className="shrink-0" size={18}/>{children}</div>; }
+
+type SenderView={label:string;ready:boolean;notice:string|null;settingsLink?:boolean};
+function senderNotice(sender:SenderStatus):SenderView{
+  const account=sender.mode==="organization_email"?"組織Googleアカウント":"個人Googleアカウント";
+  const who=sender.fixableBy==="manager"?"オーナーか管理者に、設定画面で":"設定画面で";
+  if(sender.state==="ready")return{label:sender.email??"",ready:true,notice:null};
+  if(sender.state==="needs_reconnect")return{label:`${sender.email}（要再接続）`,ready:false,settingsLink:true,notice:`${account}（${sender.email}）の接続が切れています。Google側で権限が取り消されたか、パスワードが変更された可能性があります。${who}「再接続」してください。`};
+  return{label:"未接続",ready:false,settingsLink:true,notice:`あなたのメールは${account}から送信する設定ですが、まだ接続されていません。${who}${account}を接続してください。`};
+}

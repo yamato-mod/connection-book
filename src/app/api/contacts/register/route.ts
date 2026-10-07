@@ -3,6 +3,10 @@ import { apiError } from "@/lib/api-error";
 import { contactSchema, quickContactSchema } from "@/lib/domain";
 import { createGoogleContact, findGoogleContactByEmail, uploadBusinessCard } from "@/lib/google";
 import { assertSameOrigin, requireMember } from "@/lib/server-auth";
+import { canEditContact } from "@/lib/organization-mail";
+
+// When the card belongs to someone already in the library, the user picks how to combine it (see DuplicateStep).
+const mergeSchema = z.object({ targetContactId: z.string().uuid(), mode: z.enum(["overwrite", "append"]) }).nullable().optional();
 
 const metadataSchema = z.object({
   contact: contactSchema,
@@ -12,6 +16,7 @@ const metadataSchema = z.object({
   ocrCorrected: z.boolean(),
   imageSha256: z.string().regex(/^[a-f0-9]{64}$/),
   quickMode: z.literal(false).optional(),
+  merge: mergeSchema,
 });
 
 const quickMetadataSchema = z.object({
@@ -22,6 +27,7 @@ const quickMetadataSchema = z.object({
   ocrCorrected: z.boolean(),
   imageSha256: z.string().regex(/^[a-f0-9]{64}$/),
   quickMode: z.literal(true),
+  merge: mergeSchema,
 });
 
 export async function POST(request: Request) {
@@ -41,7 +47,27 @@ export async function POST(request: Request) {
       const event = await supabase.from("events").select("id").eq("club_id", member.club_id).eq("id", input.eventId).single();
       if (event.error) return Response.json({ error: "invalid_event", message: "選択中のイベントを確認してください。" }, { status: 409 });
     }
-    const registration = await supabase.rpc("register_business_card_contact", {
+    if (input.merge?.mode === "overwrite") {
+      const target = await supabase.from("contacts").select("created_by").eq("club_id", member.club_id).eq("id", input.merge.targetContactId).maybeSingle();
+      if (target.error) throw target.error;
+      if (!target.data) return Response.json({ error: "merge_target_missing", message: "統合先の名刺が見つかりません（削除された可能性があります）。重複確認からやり直してください。" }, { status: 409 });
+      if (!canEditContact(member, target.data)) return Response.json({ error: "forbidden", message: "上書きできるのは、この名刺を登録した人と管理者だけです。「併記して保存」を選んでください。" }, { status: 403 });
+    }
+    const imageName = image.name || `business-card-${Date.now()}.jpg`;
+    const registration = input.merge ? await supabase.rpc("merge_business_card_into_contact", {
+      p_club_id: member.club_id,
+      p_member_id: member.id,
+      p_event_id: input.eventId,
+      p_target_contact_id: input.merge.targetContactId,
+      p_mode: input.merge.mode,
+      // Quick mode is always "undecided"; merging must not downgrade an existing contact's classification.
+      p_contact: { ...input.contact, classification: isQuick ? "" : input.classification },
+      p_ocr_raw_text: input.rawText,
+      p_ocr_corrected: input.ocrCorrected,
+      p_image_sha256: input.imageSha256,
+      p_image_name: imageName,
+      p_image_mime_type: image.type,
+    }) : await supabase.rpc("register_business_card_contact", {
       p_club_id: member.club_id,
       p_member_id: member.id,
       p_event_id: input.eventId,
@@ -49,9 +75,10 @@ export async function POST(request: Request) {
       p_ocr_raw_text: input.rawText,
       p_ocr_corrected: input.ocrCorrected,
       p_image_sha256: input.imageSha256,
-      p_image_name: image.name || `business-card-${Date.now()}.jpg`,
+      p_image_name: imageName,
       p_image_mime_type: image.type,
     });
+    if (input.merge && registration.error?.code === "P0002") return Response.json({ error: "merge_target_missing", message: "統合先の名刺が見つかりません（削除された可能性があります）。重複確認からやり直してください。" }, { status: 409 });
     if (registration.error || !registration.data) throw registration.error ?? new Error("contact registration failed");
     const contactId = registration.data as string;
     await supabase.from("audit_logs").insert([{club_id:member.club_id,actor_member_id:member.id,action:"classification_selected",entity_type:"contact",entity_id:contactId,metadata:{classification:input.classification}},{club_id:member.club_id,actor_member_id:member.id,action:input.ocrCorrected?"ocr_corrected":"ocr_confirmed",entity_type:"contact",entity_id:contactId,metadata:{}}]);
@@ -70,7 +97,7 @@ export async function POST(request: Request) {
       await supabase.from("business_cards").update({ drive_status: "failed", drive_error: message }).eq("club_id", member.club_id).eq("contact_id", contactId);
     }
 
-    if (!isQuick && input.contact.email) {
+    if (!isQuick && input.contact.email && input.merge?.mode !== "append") {
       try {
         await supabase.from("contacts").update({ people_sync_status: "processing", people_sync_error: null }).eq("club_id", member.club_id).eq("id", contactId);
         const person = await findGoogleContactByEmail(input.contact.email) ?? await createGoogleContact(input.contact);
@@ -81,7 +108,7 @@ export async function POST(request: Request) {
         await supabase.from("contacts").update({ people_sync_status: "failed", people_sync_error: message }).eq("club_id", member.club_id).eq("id", contactId);
       }
     } else { statuses.people = "skipped"; }
-    return Response.json({ ok: true, contactId, statuses }, { status: 201, headers: { "Cache-Control": "no-store" } });
+    return Response.json({ ok: true, contactId, merged: input.merge?.mode ?? null, statuses }, { status: 201, headers: { "Cache-Control": "no-store" } });
   } catch (error) { return apiError(error); }
 }
 

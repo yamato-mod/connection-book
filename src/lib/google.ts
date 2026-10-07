@@ -5,7 +5,8 @@ import { isConfiguredValue } from "@/lib/env-config";
 
 // gmail.compose is the narrowest single Gmail scope that preserves the existing
 // explicit draft workflow and also permits sending. No mailbox read/list scope is requested.
-export const GOOGLE_MAIL_SCOPES=["openid","email","https://www.googleapis.com/auth/gmail.compose"] as const;
+export const GMAIL_SEND_SCOPE="https://www.googleapis.com/auth/gmail.compose";
+export const GOOGLE_MAIL_SCOPES=["openid","email",GMAIL_SEND_SCOPE] as const;
 export const GOOGLE_ORGANIZATION_SCOPES=[...GOOGLE_MAIL_SCOPES,"https://www.googleapis.com/auth/calendar.events.owned"] as const;
 
 export function createGoogleOAuthClient(){
