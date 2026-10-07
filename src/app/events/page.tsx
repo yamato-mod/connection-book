@@ -308,7 +308,7 @@ function BizconView({ canManage }: { canManage: boolean }) {
         url
       })});
       setShowForm(false); setTitle(""); setOrganizer(""); setDescription("");
-      setEventDate(""); setDeadline(""); setPrize(""); setUrl("");
+      setEventDate(""); setDeadline(""); setUrl("");
       await state.reload();
     } catch (e) { setError(e instanceof Error ? e.message : "保存できませんでした。"); }
     finally { setBusy(false); }
