@@ -35,7 +35,7 @@ export async function POST(request: Request) {
     const hourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
     const [byEmail, byIp] = await Promise.all([
       supabase.from("login_link_requests").select("created_at").eq("email", email).gte("created_at", hourAgo).order("created_at", { ascending: false }),
-      ip ? supabase.from("login_link_requests").select("id", { count: "exact", head: true }).eq("ip", ip).gte("created_at", hourAgo) : Promise.resolve({ count: 0, error: null }),
+      ip ? supabase.from("login_link_requests").select("id", { count: "exact" }).limit(1).eq("ip", ip).gte("created_at", hourAgo) : Promise.resolve({ count: 0, error: null }),
     ]);
     if (byEmail.error) throw byEmail.error;
     if (byIp.error) throw byIp.error;

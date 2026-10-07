@@ -2,7 +2,9 @@ import "server-only";
 
 export function apiError(error: unknown) {
   if (error instanceof Response) return error;
-  console.error(error);
+  // Supabaseのエラーはmessageが空のことがあるので、原因が追えるように中身も出す。
+  const detail = error && typeof error === "object" ? Object.fromEntries(Object.entries(error as Record<string, unknown>).filter(([key]) => ["code", "details", "hint", "status", "name", "message"].includes(key))) : undefined;
+  console.error(error, detail);
   const message = error instanceof Error ? error.message : "Unexpected server error";
   const configuration = /configured|environment|OAuth/i.test(message);
   return Response.json(

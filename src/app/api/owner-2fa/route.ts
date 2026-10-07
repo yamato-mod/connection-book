@@ -66,7 +66,7 @@ export async function POST(request: Request) {
       const target = input.action === "send_otp" ? personalEmail : input.personalEmail;
       if (!target) return json({ error: "no_personal_email", message: "個人メールが登録されていません。設定画面から登録してください。" }, 400);
       if (await isLocked(supabase, member)) return locked();
-      const recentSends = await supabase.from("owner_2fa_verifications").select("id", { count: "exact", head: true }).eq("member_id", member.id).neq("otp_hash", "").gte("created_at", new Date(Date.now() - LOCK_WINDOW_MS).toISOString());
+      const recentSends = await supabase.from("owner_2fa_verifications").select("id", { count: "exact" }).limit(1).eq("member_id", member.id).neq("otp_hash", "").gte("created_at", new Date(Date.now() - LOCK_WINDOW_MS).toISOString());
       if (recentSends.error) throw recentSends.error;
       if ((recentSends.count ?? 0) >= MAX_SENDS) return json({ error: "too_many_sends", message: "認証コードの送信が多すぎます。15分ほど待ってから、もう一度お試しください。" }, 429);
 
@@ -168,7 +168,7 @@ function maskEmail(email: string) {
 }
 
 async function isLocked(supabase: Db, member: Member) {
-  const failures = await supabase.from("owner_2fa_attempts").select("id", { count: "exact", head: true }).eq("member_id", member.id).eq("success", false).gte("attempted_at", new Date(Date.now() - LOCK_WINDOW_MS).toISOString());
+  const failures = await supabase.from("owner_2fa_attempts").select("id", { count: "exact" }).limit(1).eq("member_id", member.id).eq("success", false).gte("attempted_at", new Date(Date.now() - LOCK_WINDOW_MS).toISOString());
   if (failures.error) throw failures.error;
   return (failures.count ?? 0) >= MAX_FAILURES;
 }
