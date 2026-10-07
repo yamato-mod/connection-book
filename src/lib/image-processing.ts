@@ -1,3 +1,5 @@
+import { cardTargetScale, findCardBounds, grayToRgba, normalizeIllumination, sauvola, toGray } from "@/lib/image-filters";
+
 export type NormalizedRect = { x: number; y: number; width: number; height: number };
 
 function canvasToBlob(canvas: HTMLCanvasElement, type = "image/jpeg", quality = 0.94) {
@@ -96,4 +98,30 @@ export async function cropImageRegion(source: Blob, region: NormalizedRect) {
   context.drawImage(bitmap.source, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, canvas.width, canvas.height);
   bitmap.close();
   return preprocessBusinessCardImage(await canvasToBlob(canvas));
+}
+
+/**
+ * Second OCR input: the card cropped out of the background, scaled so small print is legible,
+ * shadow-corrected and Sauvola-binarized. Used alongside the plain image (see recognizeBusinessCard).
+ */
+export async function binarizedCardVariant(source: Blob) {
+  const bitmap = await orientedBitmap(source);
+  const probe = document.createElement("canvas");
+  probe.width = bitmap.width; probe.height = bitmap.height;
+  const probeContext = probe.getContext("2d", { willReadFrequently: true });
+  if (!probeContext) throw new Error("画像処理を初期化できませんでした");
+  probeContext.drawImage(bitmap.source, 0, 0);
+  const full = probeContext.getImageData(0, 0, probe.width, probe.height);
+  const box = findCardBounds(toGray(full)) ?? { x: 0, y: 0, width: bitmap.width, height: bitmap.height };
+  const scale = cardTargetScale(Math.max(box.width, box.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(box.width * scale); canvas.height = Math.round(box.height * scale);
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("画像処理を初期化できませんでした");
+  context.imageSmoothingEnabled = true; context.imageSmoothingQuality = "high";
+  context.drawImage(bitmap.source, box.x, box.y, box.width, box.height, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  const binary = grayToRgba(sauvola(normalizeIllumination(toGray(context.getImageData(0, 0, canvas.width, canvas.height)))));
+  context.putImageData(new ImageData(binary.data as Uint8ClampedArray<ArrayBuffer>, binary.width, binary.height), 0, 0);
+  return canvasToBlob(canvas, "image/png");
 }

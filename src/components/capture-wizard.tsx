@@ -6,7 +6,7 @@ import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { AlertTriangle, ArrowLeft, Camera, Check, ChevronRight, FilePenLine, LoaderCircle, Mail, Pencil, Save, ScanSearch, ShieldCheck, UserRoundCheck, X, Zap } from "lucide-react";
 import { Classification, ContactInput, contactSchema, quickContactSchema, DuplicateCandidate, MergeMode, renderTemplate } from "@/lib/domain";
-import { EmailCandidate, tesseractProvider } from "@/lib/ocr";
+import { EmailCandidate, releaseOcr, tesseractProvider, warmUpOcr } from "@/lib/ocr";
 import { cropImageRegion, NormalizedRect, preprocessBusinessCardImage, rotateImage } from "@/lib/image-processing";
 import { createClient } from "@/lib/supabase/browser";
 import { appFetch, sha256Hex } from "@/lib/client-api";
@@ -55,6 +55,8 @@ export function CaptureWizard() {
   const context = useAppData<{member:{signature:string};currentEvent:{id:string;name:string}|null}>("/api/app?view=dashboard");
   const settings = useAppData<{member:{access_role:AccessRole;signature:string};sender:SenderStatus;mailSettings:MailSettings;organizationGoogle:{google_email:string;status:string}|null;userGoogle:{google_email:string;status:string}|null;templates:Array<{id:string;name:string;default_subject:string;default_body:string;is_default:boolean}>}>("/api/app?view=settings");
 
+  // Load the OCR engine while the user frames the card, and free it when leaving the screen.
+  useEffect(() => { warmUpOcr(); return () => { void releaseOcr(); }; }, []);
   useEffect(() => {
     if (quickMode) return; // no draft restore in quick mode
     const saved = localStorage.getItem("connection-book-capture-draft");
