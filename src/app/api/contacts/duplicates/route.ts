@@ -3,6 +3,7 @@ import { apiError } from "@/lib/api-error";
 import { findDuplicates } from "@/lib/domain";
 import { assertSameOrigin,requireMember } from "@/lib/server-auth";
 import { canEditContact } from "@/lib/organization-mail";
+import { canViewContactDetails } from "@/lib/membership";
 
 // email is optional so quick-mode cards (often photographed without an email) are checked too.
 const schema = z.object({ name: z.string().max(120), company: z.string().max(200), email: z.union([z.literal(""), z.string().trim().toLowerCase().email()]), phone: z.string().max(40) });
@@ -21,7 +22,15 @@ export async function POST(request: Request) {
     const results = await Promise.all(queries);
     for (const result of results) if (result.error) throw result.error;
     const rows = new Map(results.flatMap((result) => result.data ?? []).map((row) => [row.id, row]));
-    const matches = findDuplicates(input, [...rows.values()].map((row) => { const log=row.email_logs?.[0]; return { id: row.id, canOverwrite: canEditContact(member, row), name: row.name, company: row.company_name, email: row.email ?? "", phone: row.phone, existing: { name: row.name, company: row.company_name, role: row.role, email: row.email ?? "", phone: row.phone, address: row.address, website: row.website }, senderName: log?.sender?.[0]?.name, sentAt: log?.sent_at, eventName: log?.event?.[0]?.name }; }));
+    const matches = findDuplicates(input, [...rows.values()].map((row) => {
+      const log = row.email_logs?.[0];
+      // Matching uses every field, but a member without library access only gets name and affiliation back.
+      const full = canViewContactDetails(member, row);
+      return { id: row.id, canOverwrite: canEditContact(member, row), name: row.name, company: row.company_name, email: row.email ?? "", phone: row.phone,
+        existing: { name: row.name, company: row.company_name, role: full ? row.role : "", email: full ? row.email ?? "" : "", phone: full ? row.phone : "", address: full ? row.address : "", website: full ? row.website : "" },
+        detailsHidden: !full,
+        senderName: full ? log?.sender?.[0]?.name : undefined, sentAt: full ? log?.sent_at : undefined, eventName: full ? log?.event?.[0]?.name : undefined };
+    }));
     return Response.json({ duplicates: matches });
   } catch (error) { return apiError(error); }
 }

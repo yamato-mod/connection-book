@@ -2,6 +2,7 @@ import { z } from "zod";
 import { apiError } from "@/lib/api-error";
 import { asAccessRole, assertSameOrigin, requireMember, requireOrganizationManager, requireOwner } from "@/lib/server-auth";
 import { canEditContact, resolveSender, type MailSettings } from "@/lib/organization-mail";
+import { canActOnMember, canSuspend, canViewContactDetails, isOfficer, limitContact, searchableText } from "@/lib/membership";
 import { googleDrive } from "@/lib/google";
 import { isConfiguredValue } from "@/lib/env-config";
 
@@ -26,6 +27,13 @@ const mutationSchema = z.discriminatedUnion("action", [
   z.object({action:z.literal("change_member_role"),memberId:z.string().uuid(),accessRole:z.enum(["admin","member"])}),
   z.object({action:z.literal("deactivate_member"),memberId:z.string().uuid()}),
   z.object({action:z.literal("transfer_owner"),memberId:z.string().uuid()}),
+  z.object({action:z.literal("approve_member"),memberId:z.string().uuid()}),
+  z.object({action:z.literal("reject_member"),memberId:z.string().uuid(),reason:z.string().trim().max(500).default("")}),
+  z.object({action:z.literal("set_member_status"),memberId:z.string().uuid(),status:z.enum(["active","on_leave","suspended","withdrawn"]),reason:z.string().trim().max(500).default(""),suspendedUntil:z.string().datetime().nullable().default(null)}),
+  z.object({action:z.literal("change_position"),memberId:z.string().uuid(),position:z.enum(["vice_representative","treasurer","executive","member"])}),
+  z.object({action:z.literal("set_library_access"),memberId:z.string().uuid(),granted:z.boolean()}),
+  z.object({action:z.literal("request_library_access"),reason:z.string().trim().min(1).max(500)}),
+  z.object({action:z.literal("decide_library_access"),requestId:z.string().uuid(),approve:z.boolean(),note:z.string().trim().max(500).default("")}),
 ]);
 
 export async function GET(request: Request) {
@@ -50,11 +58,25 @@ export async function GET(request: Request) {
     }
     if (view === "contacts") {
       const search = (url.searchParams.get("q") ?? "").trim().toLocaleLowerCase("ja-JP");
-      const result = await supabase.from("contacts").select("id,name,company_name,university_name,organization_name,role,email,phone,classification,last_contact_at,owner:members!contacts_owner_member_id_fkey(name),contact_tags(tags(name,color)),event_contacts(event:events(name,starts_at))").eq("club_id", member.club_id).order("last_contact_at", { ascending: false }).limit(500);
-      throwFirst(result);const contacts=search?(result.data??[]).filter(row=>JSON.stringify(row).toLocaleLowerCase("ja-JP").includes(search)):(result.data??[]);return Response.json({ contacts:contacts.slice(0,100), canManage:member.access_role!=="member" });
+      const [result, request] = await Promise.all([
+        supabase.from("contacts").select("id,created_by,name,company_name,university_name,organization_name,role,email,phone,classification,last_contact_at,owner:members!contacts_owner_member_id_fkey(name),contact_tags(tags(name,color)),event_contacts(event:events(name,starts_at))").eq("club_id", member.club_id).order("last_contact_at", { ascending: false }).limit(500),
+        supabase.from("library_access_requests").select("id,status,created_at").eq("member_id", member.id).eq("status", "pending").maybeSingle(),
+      ]);
+      throwFirst(result, request);
+      // 権限のない部員には、他人が登録した名刺は人物名と所属だけを返す（連絡先は検索対象にも含めない）。
+      const rows = (result.data ?? []).map((row) => { const full = canViewContactDetails(member, row); const { created_by: _createdBy, ...rest } = row; void _createdBy; return { full, row: full ? rest : limitContact(rest) }; });
+      const contacts = (search ? rows.filter(({ row, full }) => searchableText(row, full).includes(search)) : rows).map(({ row }) => row);
+      return Response.json({ contacts: contacts.slice(0, 100), canManage: isOfficer(member), libraryAccess: isOfficer(member) || Boolean(member.library_access), pendingLibraryRequest: Boolean(request.data) });
     }
     if (view === "contact") {
       const id = z.string().uuid().parse(url.searchParams.get("id"));
+      const head = await supabase.from("contacts").select("id,created_by,name,company_name,university_name,organization_name").eq("club_id", member.club_id).eq("id", id).maybeSingle();
+      throwFirst(head);
+      if (!head.data) return Response.json({ error: "not_found", message: "この名刺は見つかりません。" }, { status: 404 });
+      if (!canViewContactDetails(member, head.data)) {
+        const request = await supabase.from("library_access_requests").select("id").eq("member_id", member.id).eq("status", "pending").maybeSingle();
+        return Response.json({ restricted: true, contact: limitContact(head.data), pendingLibraryRequest: Boolean(request.data) }, { headers: { "Cache-Control": "no-store" } });
+      }
       const emailQuery=supabase.from("email_logs").select("id,final_subject,final_body,recipient_email,actual_from_email,cc_emails,bcc_emails,sender_mode,status,error_message,sent_at,gmail_message_id,gmail_thread_id,sender_member_id").eq("club_id", member.club_id).eq("contact_id", id).order("created_at", { ascending: false });
       const [contact, notes, followups, emails, cards, events, tags, businessCards] = await Promise.all([
         supabase.from("contacts").select("*,owner:members!contacts_owner_member_id_fkey(name),contact_tags(tags(id,name,color))").eq("club_id", member.club_id).eq("id", id).single(),
@@ -85,16 +107,18 @@ export async function GET(request: Request) {
         supabase.from("integration_jobs").select("operation,status,last_error,updated_at").eq("club_id", member.club_id).order("updated_at", { ascending: false }).limit(20),
         supabase.from("clubs").select("id,name,invite_code").eq("id",member.club_id).single(),
         supabase.from("organization_mail_settings").select("admin_sender_mode,member_sender_mode,auto_cc_organization_email,allow_member_to_disable_cc").eq("club_id",member.club_id).single(),
-        manager?supabase.from("members").select("id,name,role,access_role,is_active,created_at").eq("club_id",member.club_id).order("created_at"):Promise.resolve({data:[],error:null}),
+        manager?supabase.from("members").select("id,name,role,access_role,position,status,status_reason,status_changed_at,suspended_until,joined_at,left_at,contact_email,library_access,is_active,created_at").eq("club_id",member.club_id).order("created_at"):Promise.resolve({data:[],error:null}),
         // Every member needs the organization sender status (members may send from it or be auto-CC'd). Never select the token here.
         supabase.from("organization_google_connections").select("google_email,status,connected_at").eq("club_id",member.club_id).maybeSingle(),
         supabase.from("user_google_connections").select("google_email,status,connected_at").eq("club_id",member.club_id).eq("member_id",member.id).maybeSingle(),
       ]);
       throwFirst(devices, templates, jobs,club,mailSettings,members,organizationGoogle,userGoogle);
+      const libraryRequests=manager?await supabase.from("library_access_requests").select("id,member_id,reason,created_at").eq("club_id",member.club_id).eq("status","pending").order("created_at"):{data:[],error:null};
+      throwFirst(libraryRequests);
       const legacyGoogleConfigured = [process.env.GOOGLE_CLIENT_ID,process.env.GOOGLE_CLIENT_SECRET,process.env.GOOGLE_REFRESH_TOKEN,process.env.GOOGLE_SHARED_GMAIL].every(isConfiguredValue);
       const oauthClientConfigured=[process.env.GOOGLE_CLIENT_ID,process.env.GOOGLE_CLIENT_SECRET,process.env.GOOGLE_REDIRECT_URI,process.env.GOOGLE_TOKEN_ENCRYPTION_KEY,process.env.GOOGLE_OAUTH_STATE_SECRET].every(isConfiguredValue);
       const sender=resolveSender({role:asAccessRole(member.access_role),settings:mailSettings.data as MailSettings,organizationGoogle:organizationGoogle.data,userGoogle:userGoogle.data});
-      return Response.json({ member,sender,organization:club.data,mailSettings:mailSettings.data,members:members.data??[],organizationGoogle:organizationGoogle.data,userGoogle:userGoogle.data,oauthClientConfigured,devices: devices.data ?? [], templates: templates.data ?? [], jobs: jobs.data ?? [], integrations: { gmail: Boolean(organizationGoogle.data||userGoogle.data), drive: legacyGoogleConfigured, people: legacyGoogleConfigured, calendar: legacyGoogleConfigured } });
+      return Response.json({ member,sender,canSuspend:canSuspend(member),libraryRequests:libraryRequests.data??[],organization:club.data,mailSettings:mailSettings.data,members:members.data??[],organizationGoogle:organizationGoogle.data,userGoogle:userGoogle.data,oauthClientConfigured,devices: devices.data ?? [], templates: templates.data ?? [], jobs: jobs.data ?? [], integrations: { gmail: Boolean(organizationGoogle.data||userGoogle.data), drive: legacyGoogleConfigured, people: legacyGoogleConfigured, calendar: legacyGoogleConfigured } });
     }
     return Response.json({ error: "unknown_view" }, { status: 404 });
   } catch (error) { return apiError(error); }
@@ -174,11 +198,68 @@ export async function POST(request: Request) {
       requireOrganizationManager(member);if(member.access_role==="admin"&&input.accessRole!=="member")return Response.json({error:"owner_required"},{status:403});
       const listed=await supabase.auth.admin.listUsers({page:1,perPage:1000});if(listed.error)throw listed.error;let invited=listed.data.users.find(candidate=>candidate.email?.toLowerCase()===input.email);
       if(!invited){const result=await supabase.auth.admin.inviteUserByEmail(input.email,{redirectTo:`${process.env.NEXT_PUBLIC_APP_URL}/settings`});if(result.error)throw result.error;invited=result.data.user}
-      const created=await supabase.from("members").insert({club_id:member.club_id,auth_user_id:invited.id,name:input.name,role:input.title,signature_display_name:input.name,signature:`${input.name}\n${input.title}`.trim(),access_role:input.accessRole,is_admin:input.accessRole==="admin",is_active:true}).select("id").single();throwFirst(created);await audit(supabase,member,"member_added","member",created.data!.id,{access_role:input.accessRole});
+      const created=await supabase.from("members").insert({club_id:member.club_id,auth_user_id:invited.id,name:input.name,role:input.title,signature_display_name:input.name,signature:`${input.name}\n${input.title}`.trim(),access_role:input.accessRole,is_admin:input.accessRole==="admin",status:"active",joined_at:new Date().toISOString(),contact_email:input.email}).select("id").single();throwFirst(created);await audit(supabase,member,"member_added","member",created.data!.id,{access_role:input.accessRole});
     } else if(input.action==="change_member_role"){
       requireOwner(member);if(input.memberId===member.id)return Response.json({error:"use_owner_transfer"},{status:409});const changed=await supabase.from("members").update({access_role:input.accessRole,is_admin:input.accessRole==="admin",updated_at:new Date().toISOString()}).eq("club_id",member.club_id).eq("id",input.memberId).neq("access_role","owner");throwFirst(changed);await audit(supabase,member,"member_role_changed","member",input.memberId,{access_role:input.accessRole});
     } else if(input.action==="deactivate_member"){
-      requireOrganizationManager(member);if(input.memberId===member.id)return Response.json({error:"cannot_remove_self"},{status:409});const target=await supabase.from("members").select("access_role").eq("club_id",member.club_id).eq("id",input.memberId).single();throwFirst(target);if(target.data?.access_role==="owner"||(member.access_role==="admin"&&target.data?.access_role!=="member"))return Response.json({error:"owner_required"},{status:403});const removed=await supabase.from("members").update({is_active:false,updated_at:new Date().toISOString()}).eq("club_id",member.club_id).eq("id",input.memberId);throwFirst(removed);await audit(supabase,member,"member_removed","member",input.memberId);
+      // 旧UIからの呼び出し。退部（第11条）として扱う。
+      const target=await loadTarget(supabase,member,input.memberId);if(target instanceof Response)return target;
+      await withdrawMember(supabase,member,input.memberId,"");
+    } else if(input.action==="approve_member"){
+      // 第7条: 代表又は権限を付与された幹部が承認し、名簿に登録する。
+      requireOrganizationManager(member);
+      const now=new Date().toISOString();
+      const approved=await supabase.from("members").update({status:"active",status_reason:"",joined_at:now,left_at:null,updated_at:now}).eq("club_id",member.club_id).eq("id",input.memberId).eq("status","pending").select("id");throwFirst(approved);
+      if(!approved.data?.length)return Response.json({error:"not_pending",message:"承認待ちの申請が見つかりません。"},{status:409});
+      await audit(supabase,member,"member_approved","member",input.memberId);
+    } else if(input.action==="reject_member"){
+      requireOrganizationManager(member);
+      const rejected=await supabase.from("members").update({status:"withdrawn",status_reason:input.reason||"入部申請を承認しませんでした",updated_at:new Date().toISOString()}).eq("club_id",member.club_id).eq("id",input.memberId).eq("status","pending").select("id");throwFirst(rejected);
+      if(!rejected.data?.length)return Response.json({error:"not_pending",message:"承認待ちの申請が見つかりません。"},{status:409});
+      await audit(supabase,member,"member_rejected","member",input.memberId,{reason:input.reason});
+    } else if(input.action==="set_member_status"){
+      const target=await loadTarget(supabase,member,input.memberId);if(target instanceof Response)return target;
+      if(input.status==="suspended"){
+        // 第35条: 一時制限は代表・副代表が理由を通知して30日以内。延長や活動停止（第36条）は幹部会の決議を記録する。
+        if(!canSuspend(member))return Response.json({error:"forbidden",message:"活動停止・アクセス制限は代表または副代表が行います。"},{status:403});
+        if(!input.reason)return Response.json({error:"reason_required",message:"本人に通知する理由を入力してください。"},{status:400});
+        const until=input.suspendedUntil?new Date(input.suspendedUntil):new Date(Date.now()+30*86400000);
+        if(until.getTime()<=Date.now())return Response.json({error:"invalid_until",message:"停止期限は未来の日付にしてください。"},{status:400});
+        const changed=await supabase.from("members").update({status:"suspended",status_reason:input.reason,suspended_until:until.toISOString(),updated_at:new Date().toISOString()}).eq("club_id",member.club_id).eq("id",input.memberId);throwFirst(changed);
+        await audit(supabase,member,"member_suspended","member",input.memberId,{reason:input.reason,until:until.toISOString()});
+      }else if(input.status==="withdrawn"){
+        await withdrawMember(supabase,member,input.memberId,input.reason);
+      }else{
+        // 休部・復部（第10条）。休部中も資格と議決権は残るので、ログインはできる。
+        if(target.status==="pending"||target.status==="withdrawn")return Response.json({error:"invalid_transition",message:"承認待ち・退部済みの人は、承認または再入部の手続きをしてください。"},{status:409});
+        const changed=await supabase.from("members").update({status:input.status,status_reason:input.reason,updated_at:new Date().toISOString()}).eq("club_id",member.club_id).eq("id",input.memberId);throwFirst(changed);
+        await audit(supabase,member,input.status==="on_leave"?"member_on_leave":"member_reinstated","member",input.memberId,{reason:input.reason});
+      }
+    } else if(input.action==="change_position"){
+      // 第15条: 副代表・会計・幹部は代表が指名し幹部会で選任する。アプリ上の反映は代表が行う。
+      requireOwner(member);if(input.memberId===member.id)return Response.json({error:"use_owner_transfer"},{status:409});
+      const target=await supabase.from("members").select("access_role,status").eq("club_id",member.club_id).eq("id",input.memberId).single();throwFirst(target);
+      if(target.data?.access_role==="owner")return Response.json({error:"use_owner_transfer"},{status:409});
+      if(target.data?.status!=="active"&&target.data?.status!=="on_leave")return Response.json({error:"inactive_member",message:"在籍中の部員にだけ役職を付けられます。"},{status:409});
+      const changed=await supabase.from("members").update({position:input.position,updated_at:new Date().toISOString()}).eq("club_id",member.club_id).eq("id",input.memberId);throwFirst(changed);
+      await audit(supabase,member,"member_position_changed","member",input.memberId,{position:input.position});
+    } else if(input.action==="set_library_access"){
+      requireOrganizationManager(member);
+      const now=new Date().toISOString();
+      const changed=await supabase.from("members").update(input.granted?{library_access:true,library_access_granted_by:member.id,library_access_granted_at:now,updated_at:now}:{library_access:false,library_access_granted_by:null,library_access_granted_at:null,updated_at:now}).eq("club_id",member.club_id).eq("id",input.memberId);throwFirst(changed);
+      await audit(supabase,member,input.granted?"library_access_granted":"library_access_revoked","member",input.memberId);
+    } else if(input.action==="request_library_access"){
+      if(isOfficer(member)||member.library_access)return Response.json({error:"already_granted",message:"すでに名刺ライブラリの詳細を閲覧できます。"},{status:409});
+      const created=await supabase.from("library_access_requests").insert({club_id:member.club_id,member_id:member.id,reason:input.reason});
+      if(created.error?.code==="23505")return Response.json({error:"already_requested",message:"申請済みです。幹部の承認をお待ちください。"},{status:409});
+      throwFirst(created);await audit(supabase,member,"library_access_requested","member",member.id);
+    } else if(input.action==="decide_library_access"){
+      requireOrganizationManager(member);
+      const now=new Date().toISOString();
+      const decided=await supabase.from("library_access_requests").update({status:input.approve?"approved":"rejected",decided_by:member.id,decided_at:now,decision_note:input.note}).eq("club_id",member.club_id).eq("id",input.requestId).eq("status","pending").select("member_id");throwFirst(decided);
+      const requester=decided.data?.[0]?.member_id;if(!requester)return Response.json({error:"not_pending",message:"この申請はすでに処理されています。"},{status:409});
+      if(input.approve){const granted=await supabase.from("members").update({library_access:true,library_access_granted_by:member.id,library_access_granted_at:now,updated_at:now}).eq("club_id",member.club_id).eq("id",requester);throwFirst(granted);}
+      await audit(supabase,member,input.approve?"library_access_granted":"library_access_request_rejected","member",requester,{note:input.note});
     } else if(input.action==="transfer_owner"){
       requireOwner(member);const transferred=await supabase.rpc("transfer_organization_owner",{p_club_id:member.club_id,p_current_owner_id:member.id,p_new_owner_id:input.memberId});throwFirst(transferred);await audit(supabase,member,"owner_transferred","member",input.memberId,{previous_owner_id:member.id});
     }
@@ -192,3 +273,28 @@ function throwFirst(...results: Array<{ error: unknown }>) {
 }
 
 async function audit(supabase:Awaited<ReturnType<typeof requireMember>>["supabase"],member:{id:string;club_id:string},action:string,entityType:string,entityId:string|null,metadata:Record<string,unknown>={}){const result=await supabase.from("audit_logs").insert({club_id:member.club_id,actor_member_id:member.id,action,entity_type:entityType,entity_id:entityId,metadata});throwFirst(result)}
+
+type Db=Awaited<ReturnType<typeof requireMember>>["supabase"];
+type Actor=Awaited<ReturnType<typeof requireMember>>["member"];
+
+/** Officer acting on another member, respecting the hierarchy (幹部は部員のみ、代表は全員、自分と代表は対象外). */
+async function loadTarget(supabase:Db,member:Actor,memberId:string){
+  requireOrganizationManager(member);
+  const target=await supabase.from("members").select("id,access_role,status").eq("club_id",member.club_id).eq("id",memberId).maybeSingle();throwFirst(target);
+  if(!target.data)return Response.json({error:"not_found",message:"部員が見つかりません。"},{status:404});
+  if(!canActOnMember(member,target.data))return Response.json({error:"owner_required",message:"この部員の状態は代表だけが変更できます。"},{status:403});
+  return target.data;
+}
+
+/** 第11条: 退部時は団体アカウントの権限を解除する（Google連携・端末・名刺閲覧権限・保留中の申請）。 */
+async function withdrawMember(supabase:Db,member:Actor,memberId:string,reason:string){
+  const now=new Date().toISOString();
+  const results=await Promise.all([
+    supabase.from("members").update({status:"withdrawn",status_reason:reason,left_at:now,library_access:false,library_access_granted_by:null,library_access_granted_at:null,selected_event_id:null,updated_at:now}).eq("club_id",member.club_id).eq("id",memberId),
+    supabase.from("user_google_connections").delete().eq("club_id",member.club_id).eq("member_id",memberId),
+    supabase.from("devices").update({revoked_at:now}).eq("club_id",member.club_id).eq("member_id",memberId).is("revoked_at",null),
+    supabase.from("library_access_requests").update({status:"cancelled",decided_at:now}).eq("club_id",member.club_id).eq("member_id",memberId).eq("status","pending"),
+  ]);
+  throwFirst(...results);
+  await audit(supabase,member,"member_withdrawn","member",memberId,{reason});
+}

@@ -48,16 +48,16 @@ export const mailSchema = z.object({
 });
 
 export type ExistingContactSnapshot = { name: string; company: string; role: string; email: string; phone: string; address: string; website: string };
-export type DuplicateCandidate = { strength: "strong" | "possible"; reason: "email" | "phone" | "name_company"; contactName: string; contactId?: string; canOverwrite?: boolean; existing?: ExistingContactSnapshot; senderName?: string; sentAt?: string; eventName?: string };
+export type DuplicateCandidate = { strength: "strong" | "possible"; reason: "email" | "phone" | "name_company"; contactName: string; contactId?: string; canOverwrite?: boolean; detailsHidden?: boolean; existing?: ExistingContactSnapshot; senderName?: string; sentAt?: string; eventName?: string };
 export type MergeMode = "overwrite" | "append";
 
 const digits = (value: string) => value.replace(/\D/g, "");
 const text = (value: string) => value.normalize("NFKC").replace(/\s+/g, "").toLocaleLowerCase("ja-JP");
 
-export function findDuplicates(input: Pick<ContactInput, "email" | "phone" | "name" | "company">, existing: Array<Pick<ContactInput, "email" | "phone" | "name" | "company"> & { id?: string; canOverwrite?: boolean; existing?: ExistingContactSnapshot; senderName?: string; sentAt?: string; eventName?: string }>): DuplicateCandidate[] {
+export function findDuplicates(input: Pick<ContactInput, "email" | "phone" | "name" | "company">, existing: Array<Pick<ContactInput, "email" | "phone" | "name" | "company"> & { id?: string; canOverwrite?: boolean; detailsHidden?: boolean; existing?: ExistingContactSnapshot; senderName?: string; sentAt?: string; eventName?: string }>): DuplicateCandidate[] {
   const matches: DuplicateCandidate[] = [];
   for (const candidate of existing) {
-    const ref = { contactName: candidate.name, contactId: candidate.id, canOverwrite: candidate.canOverwrite, existing: candidate.existing };
+    const ref = { contactName: candidate.name, contactId: candidate.id, canOverwrite: candidate.canOverwrite, detailsHidden: candidate.detailsHidden, existing: candidate.existing };
     if (input.email && candidate.email && candidate.email.toLowerCase() === input.email.toLowerCase()) matches.push({ strength: "strong", reason: "email", ...ref, senderName: candidate.senderName, sentAt: candidate.sentAt, eventName: candidate.eventName });
     else if (digits(input.phone).length >= 7 && digits(candidate.phone) === digits(input.phone)) matches.push({ strength: "possible", reason: "phone", ...ref });
     else if (text(input.name) === text(candidate.name) && text(input.company) === text(candidate.company)) matches.push({ strength: "possible", reason: "name_company", ...ref });
