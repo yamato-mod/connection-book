@@ -37,7 +37,10 @@ function StartFrame({children}:{children:React.ReactNode}){return <main classNam
 /** Supabaseの英語のエラーを、部員が読める日本語にする。 */
 function loginErrorMessage(error:unknown){
   const text=error instanceof Error?error.message:"";
-  if(/after \d+ seconds|rate limit|too many/i.test(text))return "短い時間に何度も送信されました。1分ほど待ってから、もう一度お試しください。";
+  const wait=text.match(/after (\d+) seconds/i);
+  if(wait)return `同じメールアドレスへの送信は少し間をあける必要があります。${wait[1]}秒ほど待ってから、もう一度お試しください。`;
+  if(/email rate limit/i.test(text))return "ログイン用メールの送信が一時的に上限に達しました。しばらく待ってから、もう一度お試しください（続く場合は代表に連絡してください）。";
+  if(/rate limit|too many/i.test(text))return "短い時間に何度も送信されました。少し待ってから、もう一度お試しください。";
   if(/invalid.*email|email.*invalid|unable to validate email/i.test(text))return "メールアドレスの形を確認してください。";
   if(/signups? not allowed|signup.*disabled/i.test(text))return "このメールアドレスではログインできません。代表または幹部に確認してください。";
   return "認証リンクを送信できませんでした。少し待ってから、もう一度お試しください。";
