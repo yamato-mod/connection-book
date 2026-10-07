@@ -9,6 +9,7 @@ import {
   Trash2,
   Users,
   X,
+  Trophy,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { EmptyState, ErrorState, LoadingState } from "@/components/data-state";
@@ -254,6 +255,171 @@ function CalendarEventChip({
 }
 
 /* ── Main page ── */
+
+/* ── ビジコン情報 ── */
+type BusinessContest = {
+  id: string;
+  title: string;
+  organizer: string;
+  body: string;
+  event_date: string | null;
+  deadline: string | null;
+  url: string;
+  is_active: boolean;
+  published_at: string;
+};
+
+function deadlineLabel(deadline: string | null): { text: string; color: string } | null {
+  if (!deadline) return null;
+  const now = new Date();
+  const dl = new Date(deadline);
+  const diff = dl.getTime() - now.getTime();
+  const days = Math.ceil(diff / (1000 * 60 * 60 * 24));
+  if (days < 0) return { text: "締切済み", color: "bg-[#e2e2e2] text-[#666]" };
+  if (days <= 3) return { text: `あと${days}日`, color: "bg-[#fde8e8] text-[#a93830]" };
+  if (days <= 7) return { text: `あと${days}日`, color: "bg-[#fff4dc] text-[#8b6118]" };
+  return { text: `あと${days}日`, color: "bg-[#e8f5ee] text-[#176b45]" };
+}
+
+function BizconView({ canManage }: { canManage: boolean }) {
+  const [showPast, setShowPast] = useState(false);
+  const state = useAppData<{ businessContests: BusinessContest[] }>(
+    `/api/app?view=business_contests${showPast ? "&showPast=true" : ""}`
+  );
+  const [showForm, setShowForm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  // Form fields
+  const [title, setTitle] = useState("");
+  const [organizer, setOrganizer] = useState("");
+  const [description, setDescription] = useState("");
+  const [eventDate, setEventDate] = useState("");
+  const [deadline, setDeadline] = useState("");
+  const [url, setUrl] = useState("");
+
+  async function createContest() {
+    setBusy(true); setError("");
+    try {
+      await appFetch("/api/app", { method: "POST", body: JSON.stringify({
+        action: "create_business_contest", title, organizer, body: description,
+        eventDate: eventDate ? new Date(eventDate).toISOString() : null,
+        deadline: deadline ? new Date(deadline).toISOString() : null,
+        url
+      })});
+      setShowForm(false); setTitle(""); setOrganizer(""); setDescription("");
+      setEventDate(""); setDeadline(""); setPrize(""); setUrl("");
+      await state.reload();
+    } catch (e) { setError(e instanceof Error ? e.message : "保存できませんでした。"); }
+    finally { setBusy(false); }
+  }
+
+  async function deleteContest(id: string) {
+    if (!confirm("このビジコン情報を削除しますか？")) return;
+    setBusy(true);
+    try { await appFetch("/api/app", { method: "POST", body: JSON.stringify({ action: "delete_business_contest", id }) }); await state.reload(); }
+    catch (e) { setError(e instanceof Error ? e.message : "削除できませんでした。"); }
+    finally { setBusy(false); }
+  }
+
+  if (state.loading && !state.data) return <LoadingState />;
+  if (state.error) return <ErrorState message={state.error} retry={state.reload} />;
+
+  const contests = state.data?.businessContests ?? [];
+
+  return (
+    <div className="mt-4 grid gap-4">
+      {/* Toggle past items */}
+      <div className="flex items-center justify-between">
+        <label className="flex items-center gap-2 text-sm font-bold text-[#68746d]">
+          <input type="checkbox" checked={showPast} onChange={e => setShowPast(e.target.checked)} className="rounded" />
+          過去のビジコンも表示
+        </label>
+        {canManage && (
+          <button className="btn-primary text-sm" onClick={() => setShowForm(!showForm)}>
+            + ビジコン情報を追加
+          </button>
+        )}
+      </div>
+
+      {showForm && (
+        <section className="card grid gap-3 p-5">
+          <div className="flex items-center justify-between">
+            <h3 className="font-black">ビジコン情報を追加</h3>
+            <button onClick={() => setShowForm(false)} className="rounded-lg p-1 hover:bg-[#f1f3f1]"><X size={18} /></button>
+          </div>
+          <input className="field" placeholder="大会名" value={title} onChange={e => setTitle(e.target.value)} />
+          <input className="field" placeholder="主催" value={organizer} onChange={e => setOrganizer(e.target.value)} />
+          <textarea className="field min-h-24" placeholder="概要" value={description} onChange={e => setDescription(e.target.value)} />
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="label">開催日<input className="field" type="date" value={eventDate} onChange={e => setEventDate(e.target.value)} /></label>
+            <label className="label">応募締切<input className="field" type="date" value={deadline} onChange={e => setDeadline(e.target.value)} /></label>
+          </div>
+          <input className="field" placeholder="URL" value={url} onChange={e => setUrl(e.target.value)} />
+          <button className="btn-primary" disabled={busy || !title} onClick={createContest}>{busy ? "保存中…" : "追加"}</button>
+          {error && <p className="text-sm font-bold text-[#a93830]">{error}</p>}
+        </section>
+      )}
+
+      {!contests.length ? (
+        <EmptyState>ビジコン情報はまだありません。</EmptyState>
+      ) : (
+        contests.map(c => {
+          const dl = deadlineLabel(c.deadline);
+          const eventD = c.event_date ? new Date(c.event_date) : null;
+          return (
+            <article className="card p-5" key={c.id}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex gap-3">
+                  <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-[#f0e6ff] text-[#6b3fa0]">
+                    <Trophy />
+                  </span>
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {dl && (
+                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-black ${dl.color}`}>
+                          {dl.text}
+                        </span>
+                      )}
+                      <h3 className="text-lg font-black">{c.title}</h3>
+                    </div>
+                    {c.organizer && <p className="mt-0.5 text-sm font-bold text-[#6b3fa0]">{c.organizer}</p>}
+                    {c.body && <p className="mt-2 whitespace-pre-wrap text-sm text-[#3a4a3e]">{c.body}</p>}
+                    <div className="mt-3 flex flex-wrap gap-3 text-xs text-[#68746d]">
+                      {eventD && (
+                        <span className="flex items-center gap-1">
+                          <CalendarDays size={12} />
+                          {new Intl.DateTimeFormat("ja-JP", { year: "numeric", month: "numeric", day: "numeric" }).format(eventD)}
+                        </span>
+                      )}
+                      {c.deadline && (
+                        <span className="flex items-center gap-1">
+                          <Clock size={12} />
+                          締切: {new Intl.DateTimeFormat("ja-JP", { month: "numeric", day: "numeric" }).format(new Date(c.deadline))}
+                        </span>
+                      )}
+                    </div>
+                    {c.url && (
+                      <a href={c.url} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block text-xs font-bold text-[#176b45] underline">
+                        詳細を見る →
+                      </a>
+                    )}
+                  </div>
+                </div>
+                {canManage && (
+                  <button className="shrink-0 rounded-lg p-2 text-[#a93830] hover:bg-[#fff0ee]" disabled={busy} onClick={() => deleteContest(c.id)}>
+                    <Trash2 size={16} />
+                  </button>
+                )}
+              </div>
+            </article>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
 export default function EventsPage() {
   const state = useAppData<EventsData>("/api/events");
   const [open, setOpen] = useState(false);
@@ -266,7 +432,7 @@ export default function EventsPage() {
   const [makeCurrent, setMakeCurrent] = useState(true);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [view, setView] = useState<"calendar" | "list">("calendar");
+  const [view, setView] = useState<"calendar" | "list" | "bizcon">("calendar");
   const [selectedEvent, setSelectedEvent] = useState<LocalEvent | null>(null);
 
   /* Calendar month state */
@@ -583,6 +749,13 @@ export default function EventsPage() {
             </span>
           )}
         </button>
+        <button
+          className={`flex-1 rounded-lg px-3 py-2 text-sm font-black transition ${view === "bizcon" ? "bg-white shadow-sm" : "text-[#68746d]"}`}
+          onClick={() => setView("bizcon")}
+        >
+          <Trophy size={14} className="mr-1 inline" />
+          ビジコン
+        </button>
       </div>
 
       {/* ── Calendar view ── */}
@@ -818,6 +991,10 @@ export default function EventsPage() {
           busy={busy}
         />
       )}
+
+      {/* ── ビジコン情報 view ── */}
+      {view === "bizcon" && <BizconView canManage={data.canManage} />}
+
     </div>
   );
 }

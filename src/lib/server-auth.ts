@@ -34,6 +34,30 @@ export function requireOwner(member:{access_role:string}){
   if(member.access_role!=="owner")throw new Response("Owner access required",{status:403});
 }
 
+/**
+ * Check if the owner has completed 2FA verification for this session.
+ * Called after requireOwner() when owner-level operations need 2FA enforcement.
+ * Returns true if 2FA is not required (no personal email registered) or if verified.
+ */
+export async function requireOwner2FA(supabase: ReturnType<typeof createAdminClient>, member: {id:string; club_id:string; access_role:string}){
+  requireOwner(member);
+  // Check if owner has a registered 2FA email
+  const {data:twoFaEmail} = await supabase.from("owner_2fa_emails").select("id").eq("club_id", member.club_id).maybeSingle();
+  if(!twoFaEmail) return; // No 2FA email registered — skip 2FA check
+
+  // Check for a verified 2FA session within the last 24 hours
+  const windowStart = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const {data:verified} = await supabase.from("owner_2fa_verifications")
+    .select("id")
+    .eq("member_id", member.id)
+    .not("verified_at", "is", null)
+    .gte("verified_at", windowStart)
+    .limit(1)
+    .maybeSingle();
+
+  if(!verified) throw Response.json({error:"owner_2fa_required",message:"オーナー認証が必要です。個人メールに送信された認証コードを入力してください。"},{status:403,headers:{"Cache-Control":"no-store"}});
+}
+
 export function asAccessRole(value:string):AccessRole{
   if(value==="owner"||value==="admin"||value==="member")return value;
   throw new Response("Invalid member role",{status:403});

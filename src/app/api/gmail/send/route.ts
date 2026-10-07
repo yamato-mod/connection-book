@@ -23,7 +23,7 @@ export async function POST(request:Request){
     ]);
     if(settingsResult.error)throw settingsResult.error;
     const settings=settingsResult.data as MailSettings,role=asAccessRole(member.access_role);
-    const sender=resolveSender({role,settings,organizationGoogle:organizationConnection.data,userGoogle:userConnection.data}),senderMode=sender.mode;
+    const sender=resolveSender({role,settings,organizationGoogle:organizationConnection.data,userGoogle:userConnection.data,senderModeOverride:input.senderModeOverride}),senderMode=sender.mode;
     const selected=senderMode==="organization_email"?organizationConnection.data:userConnection.data;
     if(sender.state!=="ready"||!selected){const prefix=senderMode==="organization_email"?"organization":"user";return Response.json({error:sender.state==="needs_reconnect"?`${prefix}_google_reauth_required`:`${prefix}_google_not_connected`,sender},{status:409});}
     selectedConnection={table:senderMode==="organization_email"?"organization_google_connections":"user_google_connections",clubId:member.club_id,memberId:member.id,supabase};

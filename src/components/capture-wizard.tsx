@@ -22,10 +22,10 @@ const meta: Record<"important" | "courtesy", { label: string; tone: string }> = 
   courtesy: { label: "礼儀", tone: "bg-[#e2f2e8] text-[#176b45]" },
 };
 
-export function CaptureWizard() {
+export function CaptureWizard(props: { captureMode?: "quick" | "important" | "courtesy" } = {}) {
   const params = useSearchParams();
-  const quickMode = params.get("mode") === "quick";
-  const param = params.get("classification");
+  const quickMode = props.captureMode === "quick" || params.get("mode") === "quick";
+  const param = props.captureMode || params.get("classification");
   const classification: Exclude<Classification, "no_contact"> = quickMode ? "undecided" : (param === "important" ? "important" : "courtesy");
   const debugOcr = process.env.NODE_ENV !== "production" || (process.env.NEXT_PUBLIC_ENABLE_OCR_DEBUG === "true" && params.get("debug") === "ocr");
   const [step, setStep] = useState<Step>("capture");

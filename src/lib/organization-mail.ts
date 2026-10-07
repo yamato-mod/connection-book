@@ -1,5 +1,5 @@
 export type AccessRole = "owner" | "admin" | "member";
-export type SenderMode = "organization_email" | "personal_email";
+export type SenderMode = "organization_email" | "personal_email" | "choosable";
 
 export type MailSettings = {
   admin_sender_mode: SenderMode;
@@ -8,8 +8,10 @@ export type MailSettings = {
   allow_member_to_disable_cc: boolean;
 };
 
-export function senderModeForRole(role: AccessRole, settings: MailSettings): SenderMode {
-  return role === "member" ? settings.member_sender_mode : settings.admin_sender_mode;
+export function senderModeForRole(role: AccessRole, settings: MailSettings, override?: "organization_email" | "personal_email"): SenderMode {
+  const base = role === "member" ? settings.member_sender_mode : settings.admin_sender_mode;
+  if (base === "choosable") return override ?? "organization_email";
+  return base;
 }
 
 export function enforcedCc(input: {
@@ -50,12 +52,13 @@ export type SenderStatus = {
  * Used by both the settings API (for the UI) and the send API, so the screen and the server never disagree.
  */
 export function resolveSender(input: {
+  senderModeOverride?: "organization_email" | "personal_email";
   role: AccessRole;
   settings: MailSettings;
   organizationGoogle: GoogleConnectionSummary;
   userGoogle: GoogleConnectionSummary;
 }): SenderStatus {
-  const mode = senderModeForRole(input.role, input.settings);
+  const mode = senderModeForRole(input.role, input.settings, input.senderModeOverride);
   const connection = mode === "organization_email" ? input.organizationGoogle : input.userGoogle;
   const fixableBy = mode === "organization_email" ? "manager" : "self";
   if (!connection) return { mode, email: null, state: "not_connected", fixableBy };

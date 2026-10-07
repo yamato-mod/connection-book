@@ -22,7 +22,7 @@ const mutationSchema = z.discriminatedUnion("action", [
   z.object({ action:z.literal("create_tag"),name:z.string().trim().min(1).max(80),color:z.string().regex(/^#[0-9a-fA-F]{6}$/)}),
   z.object({ action:z.literal("set_contact_tags"),contactId:z.string().uuid(),tagIds:z.array(z.string().uuid()).max(30)}),
   z.object({action:z.literal("update_organization"),name:z.string().trim().min(1).max(160)}),
-  z.object({action:z.literal("update_mail_settings"),adminSenderMode:z.enum(["organization_email","personal_email"]),memberSenderMode:z.enum(["personal_email","organization_email"]),autoCcOrganizationEmail:z.boolean(),allowMemberToDisableCc:z.boolean()}),
+  z.object({action:z.literal("update_mail_settings"),adminSenderMode:z.enum(["organization_email","personal_email","choosable"]),memberSenderMode:z.enum(["personal_email","organization_email"]),autoCcOrganizationEmail:z.boolean(),allowMemberToDisableCc:z.boolean()}),
   z.object({action:z.literal("invite_member"),email:z.string().trim().toLowerCase().email(),name:z.string().trim().min(1).max(120),title:z.string().trim().max(120),accessRole:z.enum(["admin","member"])}),
   z.object({action:z.literal("change_member_role"),memberId:z.string().uuid(),accessRole:z.enum(["admin","member"])}),
   z.object({action:z.literal("deactivate_member"),memberId:z.string().uuid()}),
@@ -34,6 +34,15 @@ const mutationSchema = z.discriminatedUnion("action", [
   z.object({action:z.literal("set_library_access"),memberId:z.string().uuid(),granted:z.boolean()}),
   z.object({action:z.literal("request_library_access"),reason:z.string().trim().min(1).max(500)}),
   z.object({action:z.literal("decide_library_access"),requestId:z.string().uuid(),approve:z.boolean(),note:z.string().trim().max(500).default("")}),
+  z.object({action:z.literal("create_announcement"),title:z.string().trim().min(1).max(200),body:z.string().trim().min(1).max(5000),pinned:z.boolean().default(false)}),
+  z.object({action:z.literal("update_announcement"),id:z.string().uuid(),title:z.string().trim().min(1).max(200),body:z.string().trim().min(1).max(5000),pinned:z.boolean().default(false)}),
+  z.object({action:z.literal("delete_announcement"),id:z.string().uuid()}),
+  z.object({action:z.literal("create_job_posting"),title:z.string().trim().min(1).max(200),company:z.string().max(200).default(""),body:z.string().trim().min(1).max(5000),hourlyRate:z.string().max(100).default(""),location:z.string().max(300).default(""),deadline:z.string().datetime().nullable().default(null),contactInfo:z.string().max(500).default("")}),
+  z.object({action:z.literal("update_job_posting"),id:z.string().uuid(),title:z.string().trim().min(1).max(200),company:z.string().max(200).default(""),body:z.string().trim().min(1).max(5000),hourlyRate:z.string().max(100).default(""),location:z.string().max(300).default(""),deadline:z.string().datetime().nullable().default(null),contactInfo:z.string().max(500).default(""),isActive:z.boolean().default(true)}),
+  z.object({action:z.literal("delete_job_posting"),id:z.string().uuid()}),
+  z.object({action:z.literal("create_business_contest"),title:z.string().trim().min(1).max(200),organizer:z.string().max(200).default(""),body:z.string().trim().min(1).max(5000),url:z.string().max(2000).default(""),eventDate:z.string().datetime().nullable().default(null),deadline:z.string().datetime().nullable().default(null),location:z.string().max(300).default("")}),
+  z.object({action:z.literal("update_business_contest"),id:z.string().uuid(),title:z.string().trim().min(1).max(200),organizer:z.string().max(200).default(""),body:z.string().trim().min(1).max(5000),url:z.string().max(2000).default(""),eventDate:z.string().datetime().nullable().default(null),deadline:z.string().datetime().nullable().default(null),location:z.string().max(300).default(""),isActive:z.boolean().default(true)}),
+  z.object({action:z.literal("delete_business_contest"),id:z.string().uuid()}),
 ]);
 
 export async function GET(request: Request) {
@@ -119,6 +128,42 @@ export async function GET(request: Request) {
       const oauthClientConfigured=[process.env.GOOGLE_CLIENT_ID,process.env.GOOGLE_CLIENT_SECRET,process.env.GOOGLE_REDIRECT_URI,process.env.GOOGLE_TOKEN_ENCRYPTION_KEY,process.env.GOOGLE_OAUTH_STATE_SECRET].every(isConfiguredValue);
       const sender=resolveSender({role:asAccessRole(member.access_role),settings:mailSettings.data as MailSettings,organizationGoogle:organizationGoogle.data,userGoogle:userGoogle.data});
       return Response.json({ member,sender,canSuspend:canSuspend(member),libraryRequests:libraryRequests.data??[],organization:club.data,mailSettings:mailSettings.data,members:members.data??[],organizationGoogle:organizationGoogle.data,userGoogle:userGoogle.data,oauthClientConfigured,devices: devices.data ?? [], templates: templates.data ?? [], jobs: jobs.data ?? [], integrations: { gmail: Boolean(organizationGoogle.data||userGoogle.data), drive: legacyGoogleConfigured, people: legacyGoogleConfigured, calendar: legacyGoogleConfigured } });
+    }
+    if (view === "bulletin") {
+      const manager = member.access_role === "owner" || member.access_role === "admin";
+      const [announcements, jobPostings, event] = await Promise.all([
+        supabase.from("announcements").select("id,title,body,pinned,published_at,author:members!announcements_author_member_id_fkey(name)").eq("club_id", member.club_id).order("pinned", { ascending: false }).order("published_at", { ascending: false }).limit(50),
+        supabase.from("job_postings").select("id,title,company,body,hourly_rate,location,deadline,contact_info,is_active,published_at,author:members!job_postings_author_member_id_fkey(name)").eq("club_id", member.club_id).eq("is_active", true).order("published_at", { ascending: false }).limit(50),
+        member.selected_event_id ? supabase.from("events").select("id,name,starts_at").eq("club_id", member.club_id).eq("id", member.selected_event_id).maybeSingle() : supabase.from("events").select("id,name,starts_at").eq("club_id", member.club_id).eq("is_current", true).maybeSingle(),
+      ]);
+      throwFirst(announcements, jobPostings);
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const [undecidedCount, overdueCount] = await Promise.all([
+        supabase.from("contacts").select("id", { count: "exact", head: true }).eq("club_id", member.club_id).eq("classification", "undecided"),
+        supabase.from("followups").select("id", { count: "exact", head: true }).eq("club_id", member.club_id).eq("status", "open").lt("due_at", today.toISOString()),
+      ]);
+      // Check owner 2FA status
+      let owner2faRequired = false;
+      let owner2faHasEmail = false;
+      if (member.access_role === "owner") {
+        const { data: twoFaEmail } = await supabase.from("owner_2fa_emails").select("id").eq("club_id", member.club_id).maybeSingle();
+        owner2faHasEmail = !!twoFaEmail;
+        if (twoFaEmail) {
+          const windowStart = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+          const { data: verified } = await supabase.from("owner_2fa_verifications").select("id").eq("member_id", member.id).not("verified_at", "is", null).gte("verified_at", windowStart).limit(1).maybeSingle();
+          owner2faRequired = !verified;
+        }
+      }
+      return Response.json({ member, canManage: manager, announcements: announcements.data ?? [], jobPostings: jobPostings.data ?? [], currentEvent: event?.data ?? null, statusSummary: { undecided: undecidedCount.count ?? 0, overdue: overdueCount.count ?? 0 }, owner2faRequired, owner2faHasEmail });
+    }
+    if (view === "business_contests") {
+      const manager = member.access_role === "owner" || member.access_role === "admin";
+      const showPast = url.searchParams.get("showPast") === "true";
+      let query = supabase.from("business_contests").select("id,title,organizer,body,url,event_date,deadline,location,is_active,published_at,author:members!business_contests_author_member_id_fkey(name)").eq("club_id", member.club_id);
+      if (!showPast) { query = query.or("deadline.is.null,deadline.gte." + new Date().toISOString()); }
+      const result = await query.order("event_date", { ascending: true, nullsFirst: false }).limit(100);
+      throwFirst(result);
+      return Response.json({ businessContests: result.data ?? [], canManage: manager });
     }
     return Response.json({ error: "unknown_view" }, { status: 404 });
   } catch (error) { return apiError(error); }
@@ -262,6 +307,42 @@ export async function POST(request: Request) {
       await audit(supabase,member,input.approve?"library_access_granted":"library_access_request_rejected","member",requester,{note:input.note});
     } else if(input.action==="transfer_owner"){
       requireOwner(member);const transferred=await supabase.rpc("transfer_organization_owner",{p_club_id:member.club_id,p_current_owner_id:member.id,p_new_owner_id:input.memberId});throwFirst(transferred);await audit(supabase,member,"owner_transferred","member",input.memberId,{previous_owner_id:member.id});
+    } else if(input.action==="create_announcement"){
+      requireOrganizationManager(member);
+      const result=await supabase.from("announcements").insert({club_id:member.club_id,author_member_id:member.id,title:input.title,body:input.body,pinned:input.pinned}).select("id").single();throwFirst(result);
+      await audit(supabase,member,"announcement_created","announcement",result.data!.id);return Response.json({ok:true,id:result.data!.id});
+    } else if(input.action==="update_announcement"){
+      requireOrganizationManager(member);
+      const result=await supabase.from("announcements").update({title:input.title,body:input.body,pinned:input.pinned,updated_at:new Date().toISOString()}).eq("club_id",member.club_id).eq("id",input.id);throwFirst(result);
+      await audit(supabase,member,"announcement_updated","announcement",input.id);
+    } else if(input.action==="delete_announcement"){
+      requireOrganizationManager(member);
+      const result=await supabase.from("announcements").delete().eq("club_id",member.club_id).eq("id",input.id);throwFirst(result);
+      await audit(supabase,member,"announcement_deleted","announcement",input.id);
+    } else if(input.action==="create_job_posting"){
+      requireOrganizationManager(member);
+      const result=await supabase.from("job_postings").insert({club_id:member.club_id,author_member_id:member.id,title:input.title,company:input.company,body:input.body,hourly_rate:input.hourlyRate,location:input.location,deadline:input.deadline,contact_info:input.contactInfo}).select("id").single();throwFirst(result);
+      await audit(supabase,member,"job_posting_created","job_posting",result.data!.id);return Response.json({ok:true,id:result.data!.id});
+    } else if(input.action==="update_job_posting"){
+      requireOrganizationManager(member);
+      const result=await supabase.from("job_postings").update({title:input.title,company:input.company,body:input.body,hourly_rate:input.hourlyRate,location:input.location,deadline:input.deadline,contact_info:input.contactInfo,is_active:input.isActive,updated_at:new Date().toISOString()}).eq("club_id",member.club_id).eq("id",input.id);throwFirst(result);
+      await audit(supabase,member,"job_posting_updated","job_posting",input.id);
+    } else if(input.action==="delete_job_posting"){
+      requireOrganizationManager(member);
+      const result=await supabase.from("job_postings").delete().eq("club_id",member.club_id).eq("id",input.id);throwFirst(result);
+      await audit(supabase,member,"job_posting_deleted","job_posting",input.id);
+    } else if(input.action==="create_business_contest"){
+      requireOrganizationManager(member);
+      const result=await supabase.from("business_contests").insert({club_id:member.club_id,author_member_id:member.id,title:input.title,organizer:input.organizer,body:input.body,url:input.url,event_date:input.eventDate,deadline:input.deadline,location:input.location}).select("id").single();throwFirst(result);
+      await audit(supabase,member,"business_contest_created","business_contest",result.data!.id);return Response.json({ok:true,id:result.data!.id});
+    } else if(input.action==="update_business_contest"){
+      requireOrganizationManager(member);
+      const result=await supabase.from("business_contests").update({title:input.title,organizer:input.organizer,body:input.body,url:input.url,event_date:input.eventDate,deadline:input.deadline,location:input.location,is_active:input.isActive,updated_at:new Date().toISOString()}).eq("club_id",member.club_id).eq("id",input.id);throwFirst(result);
+      await audit(supabase,member,"business_contest_updated","business_contest",input.id);
+    } else if(input.action==="delete_business_contest"){
+      requireOrganizationManager(member);
+      const result=await supabase.from("business_contests").delete().eq("club_id",member.club_id).eq("id",input.id);throwFirst(result);
+      await audit(supabase,member,"business_contest_deleted","business_contest",input.id);
     }
     return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) { return apiError(error); }

@@ -43,6 +43,7 @@ export const mailSchema = z.object({
   idempotencyKey: z.string().uuid(),
   duplicateOverride: z.boolean(),
   duplicateOverrideReason: z.string().max(300).nullable(),
+  senderModeOverride: z.enum(["organization_email","personal_email"]).optional(),
 }).superRefine((value, ctx) => {
   if (value.duplicateOverride && !value.duplicateOverrideReason?.trim()) ctx.addIssue({ code: "custom", path: ["duplicateOverrideReason"], message: "重複警告を無視する理由が必要です" });
 });
