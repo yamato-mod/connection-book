@@ -22,9 +22,10 @@ const meta: Record<"important" | "courtesy", { label: string; tone: string }> = 
   courtesy: { label: "礼儀", tone: "bg-[#e2f2e8] text-[#176b45]" },
 };
 
-export function CaptureWizard(props: { captureMode?: "quick" | "important" | "courtesy" } = {}) {
+export function CaptureWizard(props: { captureMode?: "quick" | "important" | "courtesy"; onRestart?: () => void } = {}) {
   const params = useSearchParams();
-  const quickMode = props.captureMode === "quick" || params.get("mode") === "quick";
+  // 撮影タブで選んだモードがあればそれを優先し、URLのモード指定は使わない。
+  const quickMode = props.captureMode ? props.captureMode === "quick" : params.get("mode") === "quick";
   const param = props.captureMode || params.get("classification");
   const classification: Exclude<Classification, "no_contact"> = quickMode ? "undecided" : (param === "important" ? "important" : "courtesy");
   const debugOcr = process.env.NODE_ENV !== "production" || (process.env.NEXT_PUBLIC_ENABLE_OCR_DEBUG === "true" && params.get("debug") === "ocr");
@@ -238,7 +239,7 @@ export function CaptureWizard(props: { captureMode?: "quick" | "important" | "co
     )}
     {step === "duplicate" && <DuplicateStep contact={contact} duplicates={duplicates} mergeChoice={mergeChoice} setMergeChoice={(value)=>{setMergeChoice(value);setError("")}} askReason={Boolean(strongDuplicate)&&classification==="courtesy"&&!quickMode} reason={overrideReason} saving={saving} error={error} setReason={setOverrideReason} onBack={() => setStep("verify")} onContinue={continueAfterDuplicate}/>}
     {step === "mail" && <MailStep contact={contact} sender={senderView} senderChoices={senderChoices?{value:senderChoice,onChange:setSenderChoice,organization:senderChoices.organization_email.email,personal:senderChoices.personal_email.email}:null} onRetrySender={()=>void settings.reload()} ccInput={ccInput} setCcInput={setCcInput} finalCc={finalCc} bccInput={bccInput} setBccInput={setBccInput} templateName={settings.data?.templates.find(x=>x.is_default)?.name??"未設定"} signature={settings.data?.member.signature??context.data?.member.signature??""} canDisableOrganizationCc={Boolean(settings.data?.member.access_role==="member"&&settings.data.mailSettings.auto_cc_organization_email&&settings.data.mailSettings.allow_member_to_disable_cc)} disableOrganizationCc={disableOrganizationCc} setDisableOrganizationCc={setDisableOrganizationCc} subject={subject} setSubject={setSubject} body={body} setBody={setBody} confirmed={confirmed} setConfirmed={setConfirmed} error={error} sending={sending} onBack={() => setStep("verify")} onSend={send}/>}
-    {step === "done" && <DoneStep classification={classification} contactId={contactId} quickMode={quickMode}/>}
+    {step === "done" && <DoneStep classification={classification} contactId={contactId} quickMode={quickMode} onRestart={props.onRestart}/>}
   </div>;
 }
 
@@ -339,7 +340,7 @@ function MailStep(props: MailProps) { return <section className="card p-5 md:p-7
 
 function emailsFromInput(value:string){return [...new Set(value.split(/[;,\n]/).map(item=>item.trim().toLowerCase()).filter(Boolean))]}
 
-function DoneStep({ classification, contactId, quickMode }: { classification: Exclude<Classification,"no_contact">; contactId:string; quickMode: boolean }) {
+function DoneStep({ classification, contactId, quickMode, onRestart }: { classification: Exclude<Classification,"no_contact">; contactId:string; quickMode: boolean; onRestart?: () => void }) {
   return <section className="card p-8 text-center">
     <span className="mx-auto grid size-16 place-items-center rounded-full bg-[#e2f2e8] text-[#176b45]"><Check size={30}/></span>
     <h2 className="mt-4 text-2xl font-black">{quickMode ? "記録しました" : "処理を完了しました"}</h2>
@@ -350,10 +351,10 @@ function DoneStep({ classification, contactId, quickMode }: { classification: Ex
     }</p>
     <div className="mt-6 flex flex-col justify-center gap-3 sm:flex-row">
       {contactId&&<Link href={`/contacts/${contactId}`} className="btn-secondary"><Save size={18}/>人物詳細</Link>}
-      {quickMode
-        ? <Link href="/capture?mode=quick" className="btn-primary"><Camera size={18}/>続けて撮影</Link>
-        : <Link href="/" className="btn-secondary">ホーム</Link>
-      }
+      {onRestart
+        ? <button type="button" className="btn-primary" onClick={onRestart}><Camera size={18}/>続けて撮影</button>
+        : quickMode && <Link href="/capture?mode=quick" className="btn-primary"><Camera size={18}/>続けて撮影</Link>}
+      <Link href="/" className="btn-secondary">ホーム</Link>
     </div>
   </section>;
 }

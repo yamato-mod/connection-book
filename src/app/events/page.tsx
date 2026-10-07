@@ -259,6 +259,7 @@ function CalendarEventChip({
 /* ── ビジコン情報 ── */
 type BusinessContest = {
   id: string;
+  location: string;
   title: string;
   organizer: string;
   body: string;
@@ -269,13 +270,16 @@ type BusinessContest = {
   published_at: string;
 };
 
+/** 日本時間の日付（YYYY-MM-DD）。締切や開催日は「日」で数える。 */
+function jstDay(date: Date) {
+  return new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Tokyo" }).format(date);
+}
+
 function deadlineLabel(deadline: string | null): { text: string; color: string } | null {
   if (!deadline) return null;
-  const now = new Date();
-  const dl = new Date(deadline);
-  const diff = dl.getTime() - now.getTime();
-  const days = Math.ceil(diff / (1000 * 60 * 60 * 24));
-  if (days < 0) return { text: "締切済み", color: "bg-[#e2e2e2] text-[#666]" };
+  const days = Math.round((Date.parse(jstDay(new Date(deadline))) - Date.parse(jstDay(new Date()))) / 86400000);
+  if (new Date(deadline).getTime() < Date.now()) return { text: "締切済み", color: "bg-[#e2e2e2] text-[#666]" };
+  if (days <= 0) return { text: "今日締切", color: "bg-[#fde8e8] text-[#a93830]" };
   if (days <= 3) return { text: `あと${days}日`, color: "bg-[#fde8e8] text-[#a93830]" };
   if (days <= 7) return { text: `あと${days}日`, color: "bg-[#fff4dc] text-[#8b6118]" };
   return { text: `あと${days}日`, color: "bg-[#e8f5ee] text-[#176b45]" };
@@ -297,18 +301,20 @@ function BizconView({ canManage }: { canManage: boolean }) {
   const [eventDate, setEventDate] = useState("");
   const [deadline, setDeadline] = useState("");
   const [url, setUrl] = useState("");
+  const [place, setPlace] = useState("");
 
   async function createContest() {
     setBusy(true); setError("");
     try {
       await appFetch("/api/app", { method: "POST", body: JSON.stringify({
         action: "create_business_contest", title, organizer, body: description,
-        eventDate: eventDate ? new Date(eventDate).toISOString() : null,
-        deadline: deadline ? new Date(deadline).toISOString() : null,
-        url
+        // 日付だけの入力なので、開催日はその日の0時、締切はその日の23:59（日本時間）として保存する。
+        eventDate: eventDate ? new Date(`${eventDate}T00:00:00+09:00`).toISOString() : null,
+        deadline: deadline ? new Date(`${deadline}T23:59:59+09:00`).toISOString() : null,
+        url: url.trim(), location: place
       })});
       setShowForm(false); setTitle(""); setOrganizer(""); setDescription("");
-      setEventDate(""); setDeadline(""); setUrl("");
+      setEventDate(""); setDeadline(""); setUrl(""); setPlace("");
       await state.reload();
     } catch (e) { setError(e instanceof Error ? e.message : "保存できませんでした。"); }
     finally { setBusy(false); }
@@ -355,11 +361,12 @@ function BizconView({ canManage }: { canManage: boolean }) {
             <label className="label">開催日<input className="field" type="date" value={eventDate} onChange={e => setEventDate(e.target.value)} /></label>
             <label className="label">応募締切<input className="field" type="date" value={deadline} onChange={e => setDeadline(e.target.value)} /></label>
           </div>
-          <input className="field" placeholder="URL" value={url} onChange={e => setUrl(e.target.value)} />
+          <input className="field" placeholder="会場（オンラインなら「オンライン」）" value={place} onChange={e => setPlace(e.target.value)} />
+          <input className="field" type="url" inputMode="url" placeholder="URL（https://…）" value={url} onChange={e => setUrl(e.target.value)} />
           <button className="btn-primary" disabled={busy || !title} onClick={createContest}>{busy ? "保存中…" : "追加"}</button>
-          {error && <p className="text-sm font-bold text-[#a93830]">{error}</p>}
         </section>
       )}
+      {error && <p role="alert" className="card p-4 text-sm font-bold text-[#a93830]">{error}</p>}
 
       {!contests.length ? (
         <EmptyState>ビジコン情報はまだありません。</EmptyState>
@@ -370,7 +377,7 @@ function BizconView({ canManage }: { canManage: boolean }) {
           return (
             <article className="card p-5" key={c.id}>
               <div className="flex items-start justify-between gap-3">
-                <div className="flex gap-3">
+                <div className="flex min-w-0 gap-3">
                   <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-[#f0e6ff] text-[#6b3fa0]">
                     <Trophy />
                   </span>
@@ -384,22 +391,28 @@ function BizconView({ canManage }: { canManage: boolean }) {
                       <h3 className="text-lg font-black">{c.title}</h3>
                     </div>
                     {c.organizer && <p className="mt-0.5 text-sm font-bold text-[#6b3fa0]">{c.organizer}</p>}
-                    {c.body && <p className="mt-2 whitespace-pre-wrap text-sm text-[#3a4a3e]">{c.body}</p>}
+                    {c.body && <p className="mt-2 whitespace-pre-wrap text-sm text-[#3a4a3e] [overflow-wrap:anywhere]">{c.body}</p>}
                     <div className="mt-3 flex flex-wrap gap-3 text-xs text-[#68746d]">
                       {eventD && (
                         <span className="flex items-center gap-1">
                           <CalendarDays size={12} />
-                          {new Intl.DateTimeFormat("ja-JP", { year: "numeric", month: "numeric", day: "numeric" }).format(eventD)}
+                          {new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", year: "numeric", month: "numeric", day: "numeric" }).format(eventD)}
                         </span>
                       )}
                       {c.deadline && (
                         <span className="flex items-center gap-1">
                           <Clock size={12} />
-                          締切: {new Intl.DateTimeFormat("ja-JP", { month: "numeric", day: "numeric" }).format(new Date(c.deadline))}
+                          締切: {new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", month: "numeric", day: "numeric" }).format(new Date(c.deadline))}
+                        </span>
+                      )}
+                      {c.location && (
+                        <span className="flex items-center gap-1">
+                          <MapPin size={12} />
+                          {c.location}
                         </span>
                       )}
                     </div>
-                    {c.url && (
+                    {/^https?:\/\//i.test(c.url) && (
                       <a href={c.url} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block text-xs font-bold text-[#176b45] underline">
                         詳細を見る →
                       </a>

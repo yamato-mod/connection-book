@@ -40,8 +40,8 @@ const mutationSchema = z.discriminatedUnion("action", [
   z.object({action:z.literal("create_job_posting"),title:z.string().trim().min(1).max(200),company:z.string().max(200).default(""),body:z.string().trim().min(1).max(5000),hourlyRate:z.string().max(100).default(""),location:z.string().max(300).default(""),deadline:z.string().datetime().nullable().default(null),contactInfo:z.string().max(500).default("")}),
   z.object({action:z.literal("update_job_posting"),id:z.string().uuid(),title:z.string().trim().min(1).max(200),company:z.string().max(200).default(""),body:z.string().trim().min(1).max(5000),hourlyRate:z.string().max(100).default(""),location:z.string().max(300).default(""),deadline:z.string().datetime().nullable().default(null),contactInfo:z.string().max(500).default(""),isActive:z.boolean().default(true)}),
   z.object({action:z.literal("delete_job_posting"),id:z.string().uuid()}),
-  z.object({action:z.literal("create_business_contest"),title:z.string().trim().min(1).max(200),organizer:z.string().max(200).default(""),body:z.string().trim().min(1).max(5000),url:z.string().max(2000).default(""),eventDate:z.string().datetime().nullable().default(null),deadline:z.string().datetime().nullable().default(null),location:z.string().max(300).default("")}),
-  z.object({action:z.literal("update_business_contest"),id:z.string().uuid(),title:z.string().trim().min(1).max(200),organizer:z.string().max(200).default(""),body:z.string().trim().min(1).max(5000),url:z.string().max(2000).default(""),eventDate:z.string().datetime().nullable().default(null),deadline:z.string().datetime().nullable().default(null),location:z.string().max(300).default(""),isActive:z.boolean().default(true)}),
+  z.object({action:z.literal("create_business_contest"),title:z.string().trim().min(1).max(200),organizer:z.string().max(200).default(""),body:z.string().trim().max(5000).default(""),url:z.union([z.literal(""),z.string().trim().max(2000).url().regex(/^https?:\/\//i,"http(s)のURLを入力してください")]).default(""),eventDate:z.string().datetime().nullable().default(null),deadline:z.string().datetime().nullable().default(null),location:z.string().max(300).default("")}),
+  z.object({action:z.literal("update_business_contest"),id:z.string().uuid(),title:z.string().trim().min(1).max(200),organizer:z.string().max(200).default(""),body:z.string().trim().max(5000).default(""),url:z.union([z.literal(""),z.string().trim().max(2000).url().regex(/^https?:\/\//i,"http(s)のURLを入力してください")]).default(""),eventDate:z.string().datetime().nullable().default(null),deadline:z.string().datetime().nullable().default(null),location:z.string().max(300).default(""),isActive:z.boolean().default(true)}),
   z.object({action:z.literal("delete_business_contest"),id:z.string().uuid()}),
 ]);
 
@@ -75,7 +75,10 @@ export async function GET(request: Request) {
       throwFirst(result, request);
       // 権限のない部員には、他人が登録した名刺は人物名と所属だけを返す（連絡先は検索対象にも含めない）。
       const rows = (result.data ?? []).map((row) => { const full = canViewContactDetails(member, row); const { created_by: _createdBy, ...rest } = row; void _createdBy; return { full, row: full ? rest : limitContact(rest) }; });
-      const contacts = (search ? rows.filter(({ row, full }) => searchableText(row, full).includes(search)) : rows).map(({ row }) => row);
+      // 分類での絞り込みは、詳細を見られる名刺だけが対象（見られない名刺の分類は明かさない）。
+      const classification = z.enum(["important","courtesy","undecided","no_contact"]).safeParse(url.searchParams.get("classification"));
+      const byClass = classification.success ? rows.filter(({ row, full }) => full && (row as { classification?: string }).classification === classification.data) : rows;
+      const contacts = (search ? byClass.filter(({ row, full }) => searchableText(row, full).includes(search)) : byClass).map(({ row }) => row);
       return Response.json({ contacts: contacts.slice(0, 100), canManage: isOfficer(member), libraryAccess: isOfficer(member) || Boolean(member.library_access), pendingLibraryRequest: Boolean(request.data) });
     }
     if (view === "contact") {
@@ -141,7 +144,7 @@ export async function GET(request: Request) {
       const today = new Date(); today.setHours(0, 0, 0, 0);
       const [announcements, jobPostings, event, undecidedCount, overdueCount] = await Promise.all([
         supabase.from("announcements").select("id,title,body,pinned,published_at,author:members!announcements_author_member_id_fkey(name)").eq("club_id", member.club_id).order("pinned", { ascending: false }).order("published_at", { ascending: false }).limit(50),
-        supabase.from("job_postings").select("id,title,company,body,hourly_rate,location,deadline,contact_info,is_active,published_at,author:members!job_postings_author_member_id_fkey(name)").eq("club_id", member.club_id).eq("is_active", true).order("published_at", { ascending: false }).limit(50),
+        supabase.from("job_postings").select("id,title,company,body,hourly_rate,location,deadline,contact_info,is_active,published_at,author:members!job_postings_author_member_id_fkey(name)").eq("club_id", member.club_id).eq("is_active", true).or(`deadline.is.null,deadline.gte."${new Date().toISOString()}"`).order("published_at", { ascending: false }).limit(50),
         member.selected_event_id ? supabase.from("events").select("id,name,starts_at").eq("club_id", member.club_id).eq("id", member.selected_event_id).maybeSingle() : supabase.from("events").select("id,name,starts_at").eq("club_id", member.club_id).eq("is_current", true).maybeSingle(),
         supabase.from("contacts").select("id", { count: "exact", head: true }).eq("club_id", member.club_id).eq("classification", "undecided"),
         supabase.from("followups").select("id", { count: "exact", head: true }).eq("club_id", member.club_id).eq("status", "open").lt("due_at", today.toISOString()),
@@ -153,7 +156,8 @@ export async function GET(request: Request) {
       const manager = member.access_role === "owner" || member.access_role === "admin";
       const showPast = url.searchParams.get("showPast") === "true";
       let query = supabase.from("business_contests").select("id,title,organizer,body,url,event_date,deadline,location,is_active,published_at,author:members!business_contests_author_member_id_fkey(name)").eq("club_id", member.club_id);
-      if (!showPast) { query = query.or("deadline.is.null,deadline.gte." + new Date().toISOString()); }
+      // 終わったもの＝締切を過ぎたもの。締切がないものは開催日を過ぎたら終わり扱い。
+      if (!showPast) { const now = new Date().toISOString(); query = query.eq("is_active", true).or(`deadline.gte."${now}",and(deadline.is.null,event_date.is.null),and(deadline.is.null,event_date.gte."${now}")`); }
       const result = await query.order("event_date", { ascending: true, nullsFirst: false }).limit(100);
       throwFirst(result);
       return Response.json({ businessContests: result.data ?? [], canManage: manager });
@@ -167,7 +171,7 @@ export async function POST(request: Request) {
     assertSameOrigin(request);
     const { member, supabase } = await requireMember(request);
     const parsed = mutationSchema.safeParse(await request.json());
-    if (!parsed.success) return Response.json({ error: "invalid_input", details: parsed.error.flatten() }, { status: 400 });
+    if (!parsed.success) return Response.json({ error: "invalid_input", message: inputErrorMessage(parsed.error), details: parsed.error.flatten() }, { status: 400 });
     const input = parsed.data;
     if (input.action === "update_profile") {
       const result = await supabase.from("members").update({ name: input.name, role: input.role, signature: input.signature, signature_display_name: input.name, updated_at: new Date().toISOString() }).eq("id", member.id).eq("club_id", member.club_id); throwFirst(result);
@@ -339,6 +343,16 @@ export async function POST(request: Request) {
     }
     return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) { return apiError(error); }
+}
+
+/** 入力エラーを、画面にそのまま出せる日本語にする。 */
+function inputErrorMessage(error: z.ZodError) {
+  const issue = error.issues[0];
+  const field = String(issue?.path[0] ?? "");
+  const labels: Record<string, string> = { title: "タイトル", body: "本文", url: "URL", deadline: "締切", eventDate: "開催日", name: "名前", email: "メールアドレス" };
+  if (field === "url") return "URLは http:// か https:// で始まる形で入力してください。";
+  if (labels[field]) return `${labels[field]}の入力を確認してください。`;
+  return "入力内容を確認してください。";
 }
 
 function throwFirst(...results: Array<{ error: unknown }>) {

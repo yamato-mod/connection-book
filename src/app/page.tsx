@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useState } from "react";
-import { AlertTriangle, ArrowRight, Briefcase, CalendarClock, ChevronRight, Clock, Inbox, KeyRound, MapPin, Megaphone, Plus, ShieldCheck, Trash2, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Briefcase, CalendarClock, ChevronRight, Clock, Inbox, JapaneseYen, KeyRound, MapPin, Megaphone, Plus, ShieldCheck, Trash2, X } from "lucide-react";
 import { ErrorState, LoadingState } from "@/components/data-state";
 import { appFetch } from "@/lib/client-api";
 import { useAppData } from "@/lib/use-app-data";
@@ -70,7 +70,7 @@ export default function Home() {
   const [jobDeadline, setJobDeadline] = useState("");
   const [jobContact, setJobContact] = useState("");
 
-  if (state.loading) return <LoadingState />;
+  if (state.loading && !state.data) return <LoadingState />;
   if (state.error?.includes("ログイン") || state.error?.includes("所属"))
     return (
       <section className="card mx-auto max-w-lg p-6 text-center">
@@ -178,7 +178,7 @@ export default function Home() {
         {d.currentEvent && (
           <div className="flex items-center gap-2 rounded-xl border border-[#dce4de] bg-white px-3 py-2 text-sm">
             <CalendarClock size={15} className="text-[#68746d]" />
-            <span className="text-[#68746d]">次のイベント</span>
+            <span className="text-[#68746d]">今のイベント</span>
             <strong>{d.currentEvent.name}</strong>
           </div>
         )}
@@ -188,7 +188,7 @@ export default function Home() {
       {(d.statusSummary.undecided > 0 || d.statusSummary.overdue > 0) && (
         <section className="grid gap-3 sm:grid-cols-2">
           {d.statusSummary.undecided > 0 && (
-            <Link href="/contacts?filter=undecided" className="flex items-center gap-3 rounded-2xl border border-[#c9cbd9] bg-[#f7f7fb] p-4">
+            <Link href="/contacts?classification=undecided" className="flex items-center gap-3 rounded-2xl border border-[#c9cbd9] bg-[#f7f7fb] p-4">
               <span className="grid size-10 place-items-center rounded-xl bg-[#e8e8f0] text-[#575d78]"><Inbox size={20} /></span>
               <span>
                 <strong className="text-2xl font-black text-[#575d78]">{d.statusSummary.undecided}</strong>
@@ -222,6 +222,8 @@ export default function Home() {
         </button>
       </div>
 
+      {message && <p role="alert" className="card p-4 text-sm font-bold text-[#a93830]">{message}</p>}
+
       {/* Announcements tab */}
       {tab === "announcements" && (
         <div className="grid gap-4">
@@ -253,7 +255,7 @@ export default function Home() {
                       {a.pinned && <span className="rounded-full bg-[#176b45] px-2 py-0.5 text-[10px] font-black text-white">ピン</span>}
                       <h2 className="text-lg font-black">{a.title}</h2>
                     </div>
-                    <p className="mt-2 whitespace-pre-wrap text-sm text-[#3a4a3e]">{a.body}</p>
+                    <p className="mt-2 whitespace-pre-wrap text-sm text-[#3a4a3e] [overflow-wrap:anywhere]">{a.body}</p>
                     <p className="mt-3 text-xs text-[#8a938d]">
                       {a.author?.name ?? "不明"} · {new Intl.DateTimeFormat("ja-JP", { month: "numeric", day: "numeric", hour: "numeric", minute: "numeric" }).format(new Date(a.published_at))}
                     </p>
@@ -305,13 +307,13 @@ export default function Home() {
                   <div className="min-w-0 flex-1">
                     <h2 className="text-lg font-black">{j.title}</h2>
                     {j.company && <p className="text-sm font-bold text-[#176b45]">{j.company}</p>}
-                    <p className="mt-2 whitespace-pre-wrap text-sm text-[#3a4a3e]">{j.body}</p>
+                    <p className="mt-2 whitespace-pre-wrap text-sm text-[#3a4a3e] [overflow-wrap:anywhere]">{j.body}</p>
                     <div className="mt-3 flex flex-wrap gap-3 text-xs text-[#68746d]">
-                      {j.hourly_rate && <span className="flex items-center gap-1">💰 {j.hourly_rate}</span>}
+                      {j.hourly_rate && <span className="flex items-center gap-1"><JapaneseYen size={12} />{j.hourly_rate}</span>}
                       {j.location && <span className="flex items-center gap-1"><MapPin size={12} />{j.location}</span>}
                       {j.deadline && <span className="flex items-center gap-1"><Clock size={12} />〆切: {new Intl.DateTimeFormat("ja-JP", { month: "numeric", day: "numeric" }).format(new Date(j.deadline))}</span>}
                     </div>
-                    {j.contact_info && <p className="mt-2 text-xs text-[#68746d]">連絡先: {j.contact_info}</p>}
+                    {j.contact_info && <p className="mt-2 text-xs text-[#68746d] [overflow-wrap:anywhere]">連絡先: {j.contact_info}</p>}
                     <p className="mt-2 text-xs text-[#8a938d]">
                       {j.author?.name ?? "不明"} · {new Intl.DateTimeFormat("ja-JP", { month: "numeric", day: "numeric" }).format(new Date(j.published_at))}
                     </p>
@@ -328,7 +330,6 @@ export default function Home() {
         </div>
       )}
 
-      {message && <p role="status" className="card p-4 text-sm font-bold">{message}</p>}
     </div>
   );
 }

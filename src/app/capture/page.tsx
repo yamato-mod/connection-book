@@ -1,6 +1,7 @@
 "use client";
 import { Suspense, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { AlertTriangle, ChevronRight, FilePenLine, Inbox, Mail, Zap } from "lucide-react";
 import { CaptureWizard } from "@/components/capture-wizard";
 import { useAppData } from "@/lib/use-app-data";
@@ -21,7 +22,7 @@ function ModeSelector({ onSelect }: { onSelect: (mode: CaptureMode) => void }) {
       {summary && (summary.undecided > 0 || summary.overdue > 0) && (
         <section className="grid gap-3 sm:grid-cols-2">
           {summary.undecided > 0 && (
-            <Link href="/contacts?filter=undecided" className="flex items-center gap-3 rounded-2xl border border-[#c9cbd9] bg-[#f7f7fb] p-4">
+            <Link href="/contacts?classification=undecided" className="flex items-center gap-3 rounded-2xl border border-[#c9cbd9] bg-[#f7f7fb] p-4">
               <span className="grid size-10 place-items-center rounded-xl bg-[#e8e8f0] text-[#575d78]"><Inbox size={20} /></span>
               <span>
                 <strong className="text-2xl font-black text-[#575d78]">{summary.undecided}</strong>
@@ -75,8 +76,12 @@ function ModeSelector({ onSelect }: { onSelect: (mode: CaptureMode) => void }) {
   );
 }
 
-export default function CapturePage() {
-  const [mode, setMode] = useState<CaptureMode | null>(null);
+function CapturePageInner() {
+  const params = useSearchParams();
+  // 「続けて撮影」など、URLでモードが決まっているときは選択画面を飛ばす。
+  const initial: CaptureMode | null = params.get("mode") === "quick" ? "quick" : params.get("classification") === "important" ? "important" : params.get("classification") === "courtesy" ? "courtesy" : null;
+  const [mode, setMode] = useState<CaptureMode | null>(initial);
+  const [round, setRound] = useState(0);
 
   if (mode === null) {
     return <ModeSelector onSelect={setMode} />;
@@ -87,9 +92,15 @@ export default function CapturePage() {
       <button onClick={() => setMode(null)} className="mb-4 flex items-center gap-1 text-sm font-bold text-[#68746d] hover:text-[#3a4a3e]">
         ← モード選択に戻る
       </button>
-      <Suspense fallback={<div className="card p-8 text-center">撮影画面を準備しています…</div>}>
-        <CaptureWizard key={mode} captureMode={mode} />
-      </Suspense>
+      <CaptureWizard key={`${mode}-${round}`} captureMode={mode} onRestart={() => setRound((n) => n + 1)} />
     </div>
+  );
+}
+
+export default function CapturePage() {
+  return (
+    <Suspense fallback={<div className="card p-8 text-center">撮影画面を準備しています…</div>}>
+      <CapturePageInner />
+    </Suspense>
   );
 }
