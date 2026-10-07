@@ -13,7 +13,20 @@ import { createCookieClient } from "@/lib/supabase/server";
 export async function GET(request: NextRequest) {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get("code");
-  const next = searchParams.get("next") ?? "/";
+  const tokenHash = searchParams.get("token_hash");
+  const type = searchParams.get("type");
+  const requestedNext = searchParams.get("next") ?? "/";
+  // 外部サイトへ飛ばされないよう、アプリ内のパスだけ受け付ける。
+  const next = requestedNext.startsWith("/") && !requestedNext.startsWith("//") ? requestedNext : "/";
+
+  // 組織Gmailから送ったログインリンク（/api/auth/login-link）
+  if (tokenHash && (type === "magiclink" || type === "email")) {
+    const supabase = await createCookieClient();
+    const { error } = await supabase.auth.verifyOtp({ token_hash: tokenHash, type });
+    if (!error) return NextResponse.redirect(`${origin}${next}`);
+    console.error("[auth/callback] Token verification failed:", error.message);
+    return NextResponse.redirect(`${origin}/start?login=expired`);
+  }
 
   if (code) {
     const supabase = await createCookieClient();
