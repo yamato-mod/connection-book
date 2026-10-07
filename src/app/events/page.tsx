@@ -288,11 +288,24 @@ function jstDay(date: Date) {
   return new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Tokyo" }).format(date);
 }
 
+/** 日本時間の時刻（HH:mm）。 */
+function jstTime(date: Date) {
+  return new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(date);
+}
+
+/** 締切の表示（23:59 のときは日付だけ）。 */
+function formatDeadline(deadline: string) {
+  const d = new Date(deadline);
+  const day = new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", month: "numeric", day: "numeric" }).format(d);
+  const time = jstTime(d);
+  return time === "23:59" ? day : `${day} ${time}`;
+}
+
 function deadlineLabel(deadline: string | null): { text: string; color: string } | null {
   if (!deadline) return null;
   const days = Math.round((Date.parse(jstDay(new Date(deadline))) - Date.parse(jstDay(new Date()))) / 86400000);
   if (new Date(deadline).getTime() < Date.now()) return { text: "締切済み", color: "bg-[#e2e2e2] text-[#666]" };
-  if (days <= 0) return { text: "今日締切", color: "bg-[#fde8e8] text-[#a93830]" };
+  if (days <= 0) { const time = jstTime(new Date(deadline)); return { text: time === "23:59" ? "今日締切" : `今日 ${time} 締切`, color: "bg-[#fde8e8] text-[#a93830]" }; }
   if (days <= 3) return { text: `あと${days}日`, color: "bg-[#fde8e8] text-[#a93830]" };
   if (days <= 7) return { text: `あと${days}日`, color: "bg-[#fff4dc] text-[#8b6118]" };
   return { text: `あと${days}日`, color: "bg-[#e8f5ee] text-[#176b45]" };
@@ -313,21 +326,42 @@ function BizconView({ canManage }: { canManage: boolean }) {
   const [description, setDescription] = useState("");
   const [eventDate, setEventDate] = useState("");
   const [deadline, setDeadline] = useState("");
+  const [deadlineTime, setDeadlineTime] = useState("23:59");
   const [url, setUrl] = useState("");
   const [place, setPlace] = useState("");
+  // 編集中のビジコン（null なら新規追加）
+  const [editingId, setEditingId] = useState<string | null>(null);
+
+  function resetForm() {
+    setShowForm(false); setEditingId(null); setTitle(""); setOrganizer(""); setDescription("");
+    setEventDate(""); setDeadline(""); setDeadlineTime("23:59"); setUrl(""); setPlace("");
+  }
+
+  function startEdit(c: BusinessContest) {
+    setEditingId(c.id);
+    setTitle(c.title); setOrganizer(c.organizer ?? ""); setDescription(c.body ?? "");
+    setEventDate(c.event_date ? jstDay(new Date(c.event_date)) : "");
+    setDeadline(c.deadline ? jstDay(new Date(c.deadline)) : "");
+    setDeadlineTime(c.deadline ? jstTime(new Date(c.deadline)) : "23:59");
+    setUrl(c.url ?? ""); setPlace(c.location ?? "");
+    setError(""); setShowForm(true);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
 
   async function createContest() {
     setBusy(true); setError("");
     try {
-      await appFetch("/api/app", { method: "POST", body: JSON.stringify({
-        action: "create_business_contest", title, organizer, body: description,
-        // 日付だけの入力なので、開催日はその日の0時、締切はその日の23:59（日本時間）として保存する。
+      const fields = {
+        title, organizer, body: description,
+        // 開催日はその日の0時、締切は入力した時刻（空なら23:59）。どちらも日本時間。
         eventDate: eventDate ? new Date(`${eventDate}T00:00:00+09:00`).toISOString() : null,
-        deadline: deadline ? new Date(`${deadline}T23:59:59+09:00`).toISOString() : null,
-        url: url.trim(), location: place
-      })});
-      setShowForm(false); setTitle(""); setOrganizer(""); setDescription("");
-      setEventDate(""); setDeadline(""); setUrl(""); setPlace("");
+        deadline: deadline ? new Date(`${deadline}T${deadlineTime || "23:59"}:${(deadlineTime || "23:59") === "23:59" ? "59" : "00"}+09:00`).toISOString() : null,
+        url: url.trim(), location: place,
+      };
+      await appFetch("/api/app", { method: "POST", body: JSON.stringify(editingId
+        ? { action: "update_business_contest", id: editingId, ...fields }
+        : { action: "create_business_contest", ...fields }) });
+      resetForm();
       await state.reload();
     } catch (e) { setError(e instanceof Error ? e.message : "保存できませんでした。"); }
     finally { setBusy(false); }
@@ -355,7 +389,7 @@ function BizconView({ canManage }: { canManage: boolean }) {
           過去のビジコンも表示
         </label>
         {canManage && (
-          <button className="btn-primary text-sm" onClick={() => setShowForm(!showForm)}>
+          <button className="btn-primary text-sm" onClick={() => (showForm ? resetForm() : (setEditingId(null), setShowForm(true)))}>
             + ビジコン情報を追加
           </button>
         )}
@@ -364,19 +398,24 @@ function BizconView({ canManage }: { canManage: boolean }) {
       {showForm && (
         <section className="card grid gap-3 p-5">
           <div className="flex items-center justify-between">
-            <h3 className="font-black">ビジコン情報を追加</h3>
-            <button onClick={() => setShowForm(false)} className="rounded-lg p-1 hover:bg-[#f1f3f1]"><X size={18} /></button>
+            <h3 className="font-black">{editingId ? "ビジコン情報を編集" : "ビジコン情報を追加"}</h3>
+            <button onClick={resetForm} className="rounded-lg p-1 hover:bg-[#f1f3f1]" aria-label="閉じる"><X size={18} /></button>
           </div>
           <input className="field" placeholder="大会名" value={title} onChange={e => setTitle(e.target.value)} />
           <input className="field" placeholder="主催" value={organizer} onChange={e => setOrganizer(e.target.value)} />
           <textarea className="field min-h-24" placeholder="概要" value={description} onChange={e => setDescription(e.target.value)} />
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="label">開催日<input className="field" type="date" value={eventDate} onChange={e => setEventDate(e.target.value)} /></label>
-            <label className="label">応募締切<input className="field" type="date" value={deadline} onChange={e => setDeadline(e.target.value)} /></label>
+            <div className="label">応募締切
+              <div className="grid grid-cols-[1fr_auto] gap-2">
+                <input className="field" type="date" aria-label="締切日" value={deadline} onChange={e => setDeadline(e.target.value)} />
+                <input className="field w-28" type="time" aria-label="締切時刻" value={deadlineTime} onChange={e => setDeadlineTime(e.target.value)} disabled={!deadline} />
+              </div>
+            </div>
           </div>
           <input className="field" placeholder="会場（オンラインなら「オンライン」）" value={place} onChange={e => setPlace(e.target.value)} />
           <input className="field" type="url" inputMode="url" placeholder="URL（https://…）" value={url} onChange={e => setUrl(e.target.value)} />
-          <button className="btn-primary" disabled={busy || !title} onClick={createContest}>{busy ? "保存中…" : "追加"}</button>
+          <button className="btn-primary" disabled={busy || !title} onClick={createContest}>{busy ? "保存中…" : editingId ? "変更を保存" : "追加"}</button>
         </section>
       )}
       {error && <p role="alert" className="card p-4 text-sm font-bold text-[#a93830]">{error}</p>}
@@ -415,7 +454,7 @@ function BizconView({ canManage }: { canManage: boolean }) {
                       {c.deadline && (
                         <span className="flex items-center gap-1">
                           <Clock size={12} />
-                          締切: {new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", month: "numeric", day: "numeric" }).format(new Date(c.deadline))}
+                          締切: {formatDeadline(c.deadline)}
                         </span>
                       )}
                       {c.location && (
@@ -433,9 +472,14 @@ function BizconView({ canManage }: { canManage: boolean }) {
                   </div>
                 </div>
                 {canManage && (
-                  <button className="shrink-0 rounded-lg p-2 text-[#a93830] hover:bg-[#fff0ee]" disabled={busy} onClick={() => deleteContest(c.id)}>
-                    <Trash2 size={16} />
-                  </button>
+                  <div className="flex shrink-0 gap-1">
+                    <button className="rounded-lg p-2 text-[#176b45] hover:bg-[#f1faf4]" disabled={busy} onClick={() => startEdit(c)} aria-label="編集">
+                      <Pencil size={16} />
+                    </button>
+                    <button className="rounded-lg p-2 text-[#a93830] hover:bg-[#fff0ee]" disabled={busy} onClick={() => deleteContest(c.id)} aria-label="削除">
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
                 )}
               </div>
             </article>
