@@ -174,9 +174,9 @@ export function CaptureWizard(props: { captureMode?: "quick" | "important" | "co
     const form=new FormData();const file=new File([ocrImage],`business-card-${Date.now()}.jpg`,{type:ocrImage.type||"image/jpeg"});
     form.set("image",file);form.set("metadata",JSON.stringify({contact,classification,eventId:context.data?.currentEvent?.id??null,rawText,ocrCorrected:emailCandidates.some(x=>x.source==="corrected"),imageSha256:await sha256Hex(ocrImage),quickMode,merge:mergeChoice&&mergeChoice!=="new"?mergeChoice:null}));
     const result=await appFetch<{contactId:string;contact?:{email:string|null;classification:string}|null;statuses:{drive:string;people:string}}>("/api/contacts/register",{method:"POST",body:form});
-    // 既存の人物に「併記」した場合は、登録済みのメールアドレスが宛先になる。画面の宛先もそれに合わせる。
+    // 既存の人物に「併記」した場合、登録済みのアドレスは変わらない。お礼はこの名刺のアドレスに送ることを案内する。
     const storedEmail=result.contact?.email?.trim().toLowerCase()??"";
-    if(storedEmail&&storedEmail!==contact.email.trim().toLowerCase()){setMailNotice(`この人はすでに ${storedEmail} で登録されているため、お礼メールはこのアドレスに送ります。新しいアドレスに送りたいときは、重複確認で「上書き」を選んでください。`);setContact(current=>({...current,email:storedEmail}))}
+    if(storedEmail&&storedEmail!==contact.email.trim().toLowerCase())setMailNotice(`この人の登録済みのアドレス（${storedEmail}）はそのまま残し、お礼メールはこの名刺のアドレス（${contact.email.trim()}）に送ります。`);
     if(result.statuses.drive==="failed"||result.statuses.people==="failed")setError("CRM登録は完了しましたが、一部のGoogle連携に失敗しました。人物詳細で状態を確認してください。");
     return result.contactId;
   }

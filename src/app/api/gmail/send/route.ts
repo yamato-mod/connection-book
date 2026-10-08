@@ -1,3 +1,4 @@
+import { isAllowedRecipient } from "@/lib/recipient";
 import { mailSchema } from "@/lib/domain";
 import { verifyConfirmationToken } from "@/lib/confirmation-token";
 import { sendGmail } from "@/lib/google";
@@ -13,7 +14,7 @@ export async function POST(request:Request){
     assertSameOrigin(request);const {user,member,supabase}=await requireMember(request);const parsed=mailSchema.safeParse(await request.json());
     if(!parsed.success)return Response.json({error:"invalid_input",details:parsed.error.flatten()},{status:400});const input=parsed.data;
     const {data:contact}=await supabase.from("contacts").select("id,email,classification").eq("id",input.contactId).eq("club_id",member.club_id).single();
-    if(!contact||(contact.classification!=="courtesy"&&contact.classification!=="important")||contact.email?.toLowerCase()!==input.recipientEmail)return Response.json({error:"contact_state_changed"},{status:409});
+    if(!contact||(contact.classification!=="courtesy"&&contact.classification!=="important")||!(await isAllowedRecipient(supabase,member.club_id,contact,input.recipientEmail)))return Response.json({error:"contact_state_changed"},{status:409});
     if(!verifyConfirmationToken(input.confirmationToken,{userId:user.id,contactId:input.contactId,email:input.recipientEmail}))return Response.json({error:"recipient_confirmation_expired"},{status:409});
 
     const [settingsResult,organizationConnection,userConnection]=await Promise.all([
