@@ -57,23 +57,28 @@ export async function POST(request: Request) {
       clubId = club.data.id;
     }
 
-    // リンクを作る（アカウントがなければ、ここで作られる。作られるだけで何も見られない）
-    const link = await supabase.auth.admin.generateLink({ type: "magiclink", email });
-    if (link.error) throw link.error;
-    const hashedToken = link.data.properties?.hashed_token;
-    const userId = link.data.user?.id;
-    if (!hashedToken || !userId) throw new Error("magic link was not generated");
-
+    // 部を決める。既存の人はアカウントを作らずに調べる（知らないメールで空のアカウントを作らない）。
     if (!clubId) {
-      const member = await supabase.from("members").select("club_id").eq("auth_user_id", userId).neq("status", "withdrawn").limit(1).maybeSingle();
-      if (member.error) throw member.error;
-      clubId = member.data?.club_id ?? null;
+      const existing = await supabase.rpc("auth_user_id_by_email", { p_email: email });
+      if (existing.error) throw existing.error;
+      const userId = existing.data as string | null;
+      if (userId) {
+        const member = await supabase.from("members").select("club_id").eq("auth_user_id", userId).neq("status", "withdrawn").limit(1).maybeSingle();
+        if (member.error) throw member.error;
+        clubId = member.data?.club_id ?? null;
+      }
     }
     if (!clubId) return json({ fallback: true });
 
     const connection = await supabase.from("organization_google_connections").select("google_email, encrypted_refresh_token, status").eq("club_id", clubId).maybeSingle();
     if (connection.error) throw connection.error;
     if (!connection.data || connection.data.status !== "active") return json({ fallback: true });
+
+    // リンクを作る（組織コードで来た新しい人は、ここでアカウントが作られる。承認されるまで何も見られない）
+    const link = await supabase.auth.admin.generateLink({ type: "magiclink", email });
+    if (link.error) throw link.error;
+    const hashedToken = link.data.properties?.hashed_token;
+    if (!hashedToken) throw new Error("magic link was not generated");
 
     const origin = new URL(request.url).origin;
     const next = `/start?intent=member${inviteCode ? `&code=${encodeURIComponent(inviteCode)}` : ""}`;

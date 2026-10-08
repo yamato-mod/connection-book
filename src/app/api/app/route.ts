@@ -195,8 +195,10 @@ export async function POST(request: Request) {
       const result = await supabase.from("followups").update({ status: input.done ? "done" : "open", completed_at: input.done ? new Date().toISOString() : null }).eq("club_id", member.club_id).eq("id", input.id); throwFirst(result);
       await audit(supabase,member,input.done?"followup_completed":"followup_reopened","followup",input.id);
     } else if (input.action === "create_followup") {
+      const denied = await contactViewDenied(supabase, member, input.contactId); if (denied) return denied;
       const result = await supabase.from("followups").insert({ club_id: member.club_id, contact_id: input.contactId, assigned_member_id: member.id, due_at: input.dueAt, content: input.content }).select("id").single(); throwFirst(result);await audit(supabase,member,"followup_created","followup",result.data!.id);return Response.json({ ok: true, id: result.data!.id });
     } else if (input.action === "add_note") {
+      const denied = await contactViewDenied(supabase, member, input.contactId); if (denied) return denied;
       const result = await supabase.from("notes").insert({ club_id: member.club_id, contact_id: input.contactId, author_member_id: member.id, body: input.body }).select("id").single(); throwFirst(result);await audit(supabase,member,"note_added","note",result.data!.id);return Response.json({ ok: true, id: result.data!.id });
     } else if (input.action === "delete_contact") {
       requireOrganizationManager(member);
@@ -230,6 +232,7 @@ export async function POST(request: Request) {
       requireOrganizationManager(member);
       const result=await supabase.from("tags").upsert({club_id:member.club_id,name:input.name,color:input.color},{onConflict:"club_id,name"}).select("id").single();throwFirst(result);await audit(supabase,member,"tag_saved","tag",result.data!.id);return Response.json({ok:true,id:result.data!.id});
     } else if(input.action==="set_contact_tags"){
+      const denied=await contactViewDenied(supabase,member,input.contactId);if(denied)return denied;
       if(input.tagIds.length){const owned=await supabase.from("tags").select("id").eq("club_id",member.club_id).in("id",input.tagIds);throwFirst(owned);if(owned.data?.length!==input.tagIds.length)return Response.json({error:"invalid_tags"},{status:403})}
       const removed=await supabase.from("contact_tags").delete().eq("club_id",member.club_id).eq("contact_id",input.contactId);throwFirst(removed);if(input.tagIds.length){const added=await supabase.from("contact_tags").insert(input.tagIds.map(tagId=>({club_id:member.club_id,contact_id:input.contactId,tag_id:tagId})));throwFirst(added)}await audit(supabase,member,"contact_tags_updated","contact",input.contactId,{tag_ids:input.tagIds});
     } else if(input.action==="update_organization"){
@@ -363,6 +366,14 @@ function throwFirst(...results: Array<{ error: unknown }>) {
 async function audit(supabase:Awaited<ReturnType<typeof requireMember>>["supabase"],member:{id:string;club_id:string},action:string,entityType:string,entityId:string|null,metadata:Record<string,unknown>={}){const result=await supabase.from("audit_logs").insert({club_id:member.club_id,actor_member_id:member.id,action,entity_type:entityType,entity_id:entityId,metadata});throwFirst(result)}
 
 type Db=Awaited<ReturnType<typeof requireMember>>["supabase"];
+
+/** 詳細を見られない人物（名刺）には、メモ・フォローアップ・タグも付けさせない。見られるなら null。 */
+async function contactViewDenied(supabase:Db,member:Awaited<ReturnType<typeof requireMember>>["member"],contactId:string){
+  const target=await supabase.from("contacts").select("created_by").eq("club_id",member.club_id).eq("id",contactId).maybeSingle();throwFirst(target);
+  if(!target.data)return Response.json({error:"not_found",message:"この名刺は見つかりません。"},{status:404});
+  if(!canViewContactDetails(member,target.data))return Response.json({error:"forbidden",message:"この人物の詳細を見る権限がありません。名刺ライブラリの閲覧を申請してください。"},{status:403});
+  return null;
+}
 type Actor=Awaited<ReturnType<typeof requireMember>>["member"];
 
 /** Officer acting on another member, respecting the hierarchy (幹部は部員のみ、代表は全員、自分と代表は対象外). */

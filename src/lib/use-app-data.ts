@@ -19,6 +19,8 @@ function listenForAccountChanges() {
     // ログアウトや別のアカウントでのログインでは、前の人のデータを出さない。
     createClient().auth.onAuthStateChange((event) => {
       if (event === "SIGNED_OUT" || event === "SIGNED_IN" || event === "USER_UPDATED") cache.clear();
+      // ログアウトしたら、撮影途中の入力（名刺の内容）も端末から消す。共用端末で次の人に見えないように。
+      if (event === "SIGNED_OUT") { try { localStorage.removeItem("connection-book-capture-draft"); } catch { /* 保存領域が使えない端末 */ } }
     });
   } catch {
     // Supabaseの設定が無い環境では何もしない

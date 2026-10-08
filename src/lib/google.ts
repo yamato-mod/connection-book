@@ -61,6 +61,30 @@ export async function uploadBusinessCard(file: Buffer, name: string, mimeType: s
   });
 }
 
+/** 旧来の共用Google設定（環境変数）が入っているか。本番では未設定。 */
+export function isLegacyGoogleConfigured(){return isConfiguredValue(process.env.GOOGLE_REFRESH_TOKEN)&&isConfiguredValue(process.env.GOOGLE_DRIVE_FOLDER_ID)}
+
+/**
+ * 名刺画像を組織Googleアカウントのドライブに保存する（drive.file 権限＝このアプリが作ったフォルダとファイルだけ）。
+ * 「つながり帳 名刺/年/月」の下に置く。フォルダはアプリが作ったものを appProperties で探す。
+ */
+export async function uploadBusinessCardToOrganizationDrive(input:{refreshToken:string;clubId:string;file:Buffer;name:string;mimeType:string}){
+  const drive=organizationDrive(input.refreshToken),now=new Date();
+  const year=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Tokyo",year:"numeric"}).format(now),month=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Tokyo",month:"2-digit"}).format(now);
+  const folder=async(name:string,key:string,parent?:string)=>{
+    const q=`mimeType='application/vnd.google-apps.folder' and trashed=false and appProperties has { key='tsunagariCards' and value='${key}' }`;
+    const found=await drive.files.list({q,fields:"files(id)",pageSize:1});
+    if(found.data.files?.[0]?.id)return found.data.files[0].id;
+    const created=await drive.files.create({requestBody:{name,mimeType:"application/vnd.google-apps.folder",parents:parent?[parent]:undefined,appProperties:{tsunagariCards:key}},fields:"id"});
+    if(!created.data.id)throw new Error("Drive folder was not created");
+    return created.data.id;
+  };
+  const root=await folder("つながり帳 名刺",`${input.clubId}`);
+  const yearFolder=await folder(year,`${input.clubId}/${year}`,root);
+  const monthFolder=await folder(month,`${input.clubId}/${year}/${month}`,yearFolder);
+  return drive.files.create({requestBody:{name:input.name,parents:[monthFolder]},media:{mimeType:input.mimeType,body:Readable.from(input.file)},fields:"id,name,webViewLink"});
+}
+
 export async function createGoogleContact(input: { name: string; company: string; role: string; email: string; phone: string; address: string; website: string }) {
   const people = googlePeople();
   const result = await people.people.createContact({
@@ -84,9 +108,10 @@ export async function findGoogleContactByEmail(email:string){
   return result.data.results?.map(x=>x.person).find(person=>person?.emailAddresses?.some(item=>item.value?.toLowerCase()===email.toLowerCase()))??null;
 }
 
-export async function createCalendarFollowup(input: { summary: string; description: string; start: string; end: string }) {
-  const calendarId = process.env.GOOGLE_CALENDAR_ID ?? "primary";
-  return googleCalendar().events.insert({
+export async function createCalendarFollowup(input: { summary: string; description: string; start: string; end: string; refreshToken?: string }) {
+  // 組織Googleアカウントの接続があればそのカレンダー（primary）へ。無ければ旧来の共用設定。
+  const calendarId = input.refreshToken ? "primary" : (process.env.GOOGLE_CALENDAR_ID ?? "primary");
+  return googleCalendar(input.refreshToken).events.insert({
     calendarId,
     sendUpdates: "none",
     requestBody: {

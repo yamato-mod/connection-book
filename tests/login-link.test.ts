@@ -18,3 +18,26 @@ describe("login link via organization Gmail",()=>{
     expect(callback).toContain("verifyOtp");
   });
 });
+
+describe("login link does not create accounts for unknown emails",()=>{
+  const route=readFileSync(join(process.cwd(),"src/app/api/auth/login-link/route.ts"),"utf8");
+  it("looks the person up before generating a link, and only generates once a club Gmail can send",()=>{
+    expect(route.indexOf("auth_user_id_by_email")).toBeGreaterThan(-1);
+    expect(route.indexOf("auth_user_id_by_email")).toBeLessThan(route.indexOf("generateLink"));
+    expect(route.indexOf("organization_google_connections")).toBeLessThan(route.indexOf("generateLink"));
+  });
+});
+
+describe("writes on a contact require the right to view it",()=>{
+  const app=readFileSync(join(process.cwd(),"src/app/api/app/route.ts"),"utf8");
+  it("checks view rights before notes, follow-ups and tags",()=>{
+    for(const action of ['input.action === "create_followup"','input.action === "add_note"','input.action==="set_contact_tags"']){
+      const at=app.indexOf(action);
+      expect(at).toBeGreaterThan(-1);
+      expect(app.slice(at,at+200)).toContain("contactViewDenied");
+    }
+  });
+  it("checks view rights before a thank-you mail or draft",()=>{
+    for(const file of ["src/app/api/gmail/confirmation/route.ts","src/app/api/gmail/draft/route.ts"])expect(readFileSync(join(process.cwd(),file),"utf8")).toContain("canViewContactDetails(member,contact)");
+  });
+});

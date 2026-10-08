@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { apiError } from "@/lib/api-error";
-import { createCalendarFollowup } from "@/lib/google";
+import { createCalendarFollowup, isLegacyGoogleConfigured } from "@/lib/google";
+import { decryptGoogleToken } from "@/lib/google-token-crypto";
+import { canViewContactDetails } from "@/lib/membership";
 import { assertSameOrigin, requireMember } from "@/lib/server-auth";
 
 const schema = z.object({ followupId: z.string().uuid() });
@@ -9,13 +11,19 @@ export async function POST(request: Request) {
     assertSameOrigin(request);
     const { member, supabase } = await requireMember(request);
     const { followupId } = schema.parse(await request.json());
-    const result = await supabase.from("followups").select("id,content,due_at,google_calendar_event_id,contact:contacts(name)").eq("club_id", member.club_id).eq("id", followupId).single();
+    const result = await supabase.from("followups").select("id,content,due_at,google_calendar_event_id,contact:contacts(name,created_by)").eq("club_id", member.club_id).eq("id", followupId).single();
     if (result.error) throw result.error;
+    const linked = (Array.isArray(result.data.contact) ? result.data.contact[0] : result.data.contact) as { name?: string; created_by?: string | null } | null;
+    if (linked && !canViewContactDetails(member, linked)) return Response.json({ error: "forbidden", message: "この人物の詳細を見る権限がありません。" }, { status: 403 });
+    // 予定の登録先：組織Googleアカウントのカレンダー（カレンダー許可あり）→ 旧来の共用設定。
+    const connection = await supabase.from("organization_google_connections").select("encrypted_refresh_token,status,scopes").eq("club_id", member.club_id).maybeSingle();
+    const orgCalendar = connection.data?.status === "active" && (connection.data.scopes ?? []).includes("https://www.googleapis.com/auth/calendar.events.owned") ? connection.data : null;
+    if (!orgCalendar && !isLegacyGoogleConfigured()) return Response.json({ error: "organization_google_not_connected", message: "組織Googleアカウントが接続されていないため、カレンダーに登録できません。" }, { status: 409 });
     if (result.data.google_calendar_event_id) return Response.json({ ok: true, eventId: result.data.google_calendar_event_id, reused: true });
     await supabase.from("followups").update({ calendar_status: "processing", calendar_error: null }).eq("id", followupId).eq("club_id", member.club_id);
     try {
       const start = new Date(result.data.due_at); const end = new Date(start.getTime() + 30 * 60 * 1000);
-      const contactName=result.data.contact?.[0]?.name;const created = await createCalendarFollowup({ summary: `${contactName ?? "連絡先"} — ${result.data.content}`, description: "つながり帳から登録", start: start.toISOString(), end: end.toISOString() });
+      const contactName=linked?.name;const created = await createCalendarFollowup({ summary: `${contactName ?? "連絡先"} — ${result.data.content}`, description: "つながり帳から登録", start: start.toISOString(), end: end.toISOString(), refreshToken: orgCalendar ? decryptGoogleToken(orgCalendar.encrypted_refresh_token) : undefined });
       await supabase.from("followups").update({ calendar_status: "created", google_calendar_event_id: created.data.id }).eq("id", followupId).eq("club_id", member.club_id);
       await supabase.from("audit_logs").insert({club_id:member.club_id,actor_member_id:member.id,action:"calendar_event_created",entity_type:"followup",entity_id:followupId,metadata:{google_calendar_event_id:created.data.id}});
       return Response.json({ ok: true, eventId: created.data.id });

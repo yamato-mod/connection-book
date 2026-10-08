@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { apiError } from "@/lib/api-error";
 import { contactSchema, quickContactSchema } from "@/lib/domain";
-import { createGoogleContact, findGoogleContactByEmail, uploadBusinessCard } from "@/lib/google";
+import { createGoogleContact, DRIVE_FILE_SCOPE, findGoogleContactByEmail, isGoogleConnectionScopeMissing, isLegacyGoogleConfigured, uploadBusinessCard, uploadBusinessCardToOrganizationDrive } from "@/lib/google";
+import { decryptGoogleToken } from "@/lib/google-token-crypto";
 import { assertSameOrigin, requireMember } from "@/lib/server-auth";
 import { canEditContact } from "@/lib/organization-mail";
 
@@ -84,9 +85,19 @@ export async function POST(request: Request) {
     await supabase.from("audit_logs").insert([{club_id:member.club_id,actor_member_id:member.id,action:"classification_selected",entity_type:"contact",entity_id:contactId,metadata:{classification:input.classification}},{club_id:member.club_id,actor_member_id:member.id,action:input.ocrCorrected?"ocr_corrected":"ocr_confirmed",entity_type:"contact",entity_id:contactId,metadata:{}}]);
     const statuses = { drive: "pending", people: "pending" };
 
-    try {
+    // 名刺画像の保存先：組織Googleアカウントのドライブ（ドライブ許可あり）→ 旧来の共用設定 → どちらも無ければ保存しない（skipped）。
+    const orgConnection = await supabase.from("organization_google_connections").select("encrypted_refresh_token, status, scopes").eq("club_id", member.club_id).maybeSingle();
+    const orgDrive = orgConnection.data?.status === "active" && !isGoogleConnectionScopeMissing(orgConnection.data.scopes, DRIVE_FILE_SCOPE) ? orgConnection.data : null;
+    const fileName = `${input.contact.name}_${new Date().toISOString().slice(0, 10)}_${image.name}`;
+    if (!orgDrive && !isLegacyGoogleConfigured()) {
+      statuses.drive = "skipped";
+      await supabase.from("business_cards").update({ drive_status: "skipped", drive_error: "画像の保存先（組織Googleアカウントのドライブ）が未接続です。" }).eq("club_id", member.club_id).eq("contact_id", contactId);
+    } else try {
       await supabase.from("business_cards").update({ drive_status: "processing", drive_error: null }).eq("club_id", member.club_id).eq("contact_id", contactId);
-      const uploaded = await uploadBusinessCard(Buffer.from(await image.arrayBuffer()), `${input.contact.name}_${new Date().toISOString().slice(0, 10)}_${image.name}`, image.type);
+      const buffer = Buffer.from(await image.arrayBuffer());
+      const uploaded = orgDrive
+        ? await uploadBusinessCardToOrganizationDrive({ refreshToken: decryptGoogleToken(orgDrive.encrypted_refresh_token), clubId: member.club_id, file: buffer, name: fileName, mimeType: image.type })
+        : await uploadBusinessCard(buffer, fileName, image.type);
       await Promise.all([
         supabase.from("business_cards").update({ image_google_file_id: uploaded.data.id, drive_status: "uploaded" }).eq("club_id", member.club_id).eq("contact_id", contactId),
         supabase.from("google_files").insert({ club_id: member.club_id, contact_id: contactId, google_file_id: uploaded.data.id, kind: "business_card", name: uploaded.data.name ?? image.name, web_view_link: uploaded.data.webViewLink }),
@@ -97,7 +108,8 @@ export async function POST(request: Request) {
       await supabase.from("business_cards").update({ drive_status: "failed", drive_error: message }).eq("club_id", member.club_id).eq("contact_id", contactId);
     }
 
-    if (!isQuick && input.contact.email && input.merge?.mode !== "append") {
+    // Google連絡先への登録は旧来の共用設定があるときだけ（組織接続には連絡先の権限を付けていない）。
+    if (!isQuick && input.contact.email && input.merge?.mode !== "append" && isLegacyGoogleConfigured()) {
       try {
         await supabase.from("contacts").update({ people_sync_status: "processing", people_sync_error: null }).eq("club_id", member.club_id).eq("id", contactId);
         const person = await findGoogleContactByEmail(input.contact.email) ?? await createGoogleContact(input.contact);
