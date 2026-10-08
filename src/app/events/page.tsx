@@ -1075,7 +1075,7 @@ export default function EventsPage() {
                       <strong className="block text-xl text-[#626780]">
                         {c.undecided}
                       </strong>
-                      <span className="text-[10px]">判断迷う</span>
+                      <span className="text-[10px]">登録のみ</span>
                     </div>
                   </div>
                 </article>

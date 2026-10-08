@@ -1,6 +1,10 @@
 import { z } from "zod";
 
 export const classifications = ["important", "courtesy", "undecided", "no_contact"] as const;
+/** 画面に出す分類名。undecided は「撮って登録しただけ」の状態。 */
+export const classificationLabel: Record<string, string> = { important: "重要", courtesy: "礼儀", undecided: "登録のみ", no_contact: "連絡なし" };
+/** Google連絡先・Gmail下書きの処理状態の表示名。 */
+export const syncStatusLabel: Record<string, string> = { pending: "未実行", processing: "処理中", synced: "登録済み", created: "作成済み", failed: "失敗", skipped: "対象外" };
 export type Classification = (typeof classifications)[number];
 
 export const contactSchema = z.object({
