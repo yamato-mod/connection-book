@@ -82,6 +82,13 @@ export async function POST(request: Request) {
     if (input.merge && registration.error?.code === "P0002") return Response.json({ error: "merge_target_missing", message: "統合先の名刺が見つかりません（削除された可能性があります）。重複確認からやり直してください。" }, { status: 409 });
     if (registration.error || !registration.data) throw registration.error ?? new Error("contact registration failed");
     const contactId = registration.data as string;
+    // 既存の人物に「併記」したとき、その人が「登録のみ」のままだと礼儀・重要の処理（お礼メール・下書き）が通らない。登録のみからの格上げだけは行う。
+    if (input.merge && !isQuick && (input.classification === "courtesy" || input.classification === "important")) {
+      const promoted = await supabase.from("contacts").update({ classification: input.classification, updated_at: new Date().toISOString() }).eq("club_id", member.club_id).eq("id", contactId).eq("classification", "undecided");
+      if (promoted.error) throw promoted.error;
+    }
+    const stored = await supabase.from("contacts").select("email,classification").eq("club_id", member.club_id).eq("id", contactId).maybeSingle();
+    if (stored.error) throw stored.error;
     await supabase.from("audit_logs").insert([{club_id:member.club_id,actor_member_id:member.id,action:"classification_selected",entity_type:"contact",entity_id:contactId,metadata:{classification:input.classification}},{club_id:member.club_id,actor_member_id:member.id,action:input.ocrCorrected?"ocr_corrected":"ocr_confirmed",entity_type:"contact",entity_id:contactId,metadata:{}}]);
     const statuses = { drive: "pending", people: "pending" };
 
@@ -120,7 +127,7 @@ export async function POST(request: Request) {
         await supabase.from("contacts").update({ people_sync_status: "failed", people_sync_error: message }).eq("club_id", member.club_id).eq("id", contactId);
       }
     } else { statuses.people = "skipped"; }
-    return Response.json({ ok: true, contactId, merged: input.merge?.mode ?? null, statuses }, { status: 201, headers: { "Cache-Control": "no-store" } });
+    return Response.json({ ok: true, contactId, contact: stored.data ?? null, merged: input.merge?.mode ?? null, statuses }, { status: 201, headers: { "Cache-Control": "no-store" } });
   } catch (error) { return apiError(error); }
 }
 

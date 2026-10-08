@@ -31,6 +31,7 @@ export function CaptureWizard(props: { captureMode?: "quick" | "important" | "co
   const debugOcr = process.env.NODE_ENV !== "production" || (process.env.NEXT_PUBLIC_ENABLE_OCR_DEBUG === "true" && params.get("debug") === "ocr");
   const [step, setStep] = useState<Step>("capture");
   const [contact, setContact] = useState<ContactInput>(blank);
+  const [mailNotice, setMailNotice] = useState("");
   const [emailCandidates, setEmailCandidates] = useState<EmailCandidate[]>([]);
   const [rawText, setRawText] = useState("");
   const [image, setImage] = useState<string>();
@@ -172,7 +173,10 @@ export function CaptureWizard(props: { captureMode?: "quick" | "important" | "co
     if(!ocrImage)throw new Error("名刺画像がありません。撮影からやり直してください。");
     const form=new FormData();const file=new File([ocrImage],`business-card-${Date.now()}.jpg`,{type:ocrImage.type||"image/jpeg"});
     form.set("image",file);form.set("metadata",JSON.stringify({contact,classification,eventId:context.data?.currentEvent?.id??null,rawText,ocrCorrected:emailCandidates.some(x=>x.source==="corrected"),imageSha256:await sha256Hex(ocrImage),quickMode,merge:mergeChoice&&mergeChoice!=="new"?mergeChoice:null}));
-    const result=await appFetch<{contactId:string;statuses:{drive:string;people:string}}>("/api/contacts/register",{method:"POST",body:form});
+    const result=await appFetch<{contactId:string;contact?:{email:string|null;classification:string}|null;statuses:{drive:string;people:string}}>("/api/contacts/register",{method:"POST",body:form});
+    // 既存の人物に「併記」した場合は、登録済みのメールアドレスが宛先になる。画面の宛先もそれに合わせる。
+    const storedEmail=result.contact?.email?.trim().toLowerCase()??"";
+    if(storedEmail&&storedEmail!==contact.email.trim().toLowerCase()){setMailNotice(`この人はすでに ${storedEmail} で登録されているため、お礼メールはこのアドレスに送ります。新しいアドレスに送りたいときは、重複確認で「上書き」を選んでください。`);setContact(current=>({...current,email:storedEmail}))}
     if(result.statuses.drive==="failed"||result.statuses.people==="failed")setError("CRM登録は完了しましたが、一部のGoogle連携に失敗しました。人物詳細で状態を確認してください。");
     return result.contactId;
   }
@@ -238,6 +242,7 @@ export function CaptureWizard(props: { captureMode?: "quick" | "important" | "co
         />
     )}
     {step === "duplicate" && <DuplicateStep contact={contact} duplicates={duplicates} mergeChoice={mergeChoice} setMergeChoice={(value)=>{setMergeChoice(value);setError("")}} askReason={Boolean(strongDuplicate)&&classification==="courtesy"&&!quickMode} reason={overrideReason} saving={saving} error={error} setReason={setOverrideReason} onBack={() => setStep("verify")} onContinue={continueAfterDuplicate}/>}
+    {step === "mail" && mailNotice && <p className="mb-3 rounded-xl border border-[#e8c98a] bg-[#fff8e6] p-3 text-sm font-bold text-[#7a5200]">{mailNotice}</p>}
     {step === "mail" && <MailStep contact={contact} sender={senderView} senderChoices={senderChoices?{value:senderChoice,onChange:setSenderChoice,organization:senderChoices.organization_email.email,personal:senderChoices.personal_email.email}:null} onRetrySender={()=>void settings.reload()} ccInput={ccInput} setCcInput={setCcInput} finalCc={finalCc} bccInput={bccInput} setBccInput={setBccInput} templateName={settings.data?.templates.find(x=>x.is_default)?.name??"未設定"} signature={settings.data?.member.signature??context.data?.member.signature??""} canDisableOrganizationCc={Boolean(settings.data?.member.access_role==="member"&&settings.data.mailSettings.auto_cc_organization_email&&settings.data.mailSettings.allow_member_to_disable_cc)} disableOrganizationCc={disableOrganizationCc} setDisableOrganizationCc={setDisableOrganizationCc} subject={subject} setSubject={setSubject} body={body} setBody={setBody} confirmed={confirmed} setConfirmed={setConfirmed} error={error} sending={sending} onBack={() => setStep("verify")} onSend={send}/>}
     {step === "done" && <DoneStep classification={classification} contactId={contactId} quickMode={quickMode} onRestart={props.onRestart}/>}
   </div>;
