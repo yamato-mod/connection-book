@@ -65,7 +65,7 @@ type BackupRun={trigger:"scheduled"|"manual";status:"succeeded"|"failed";file_na
 function BackupSection(){
   const [runs,setRuns]=useState<BackupRun[]|null>(null),[keyConfigured,setKeyConfigured]=useState(true),[scheduleConfigured,setScheduleConfigured]=useState(true),[busy,setBusy]=useState(false),[msg,setMsg]=useState("");
   useEffect(()=>{appFetch<{runs:BackupRun[];keyConfigured:boolean;scheduleConfigured:boolean}>("/api/backup",{method:"POST",body:JSON.stringify({action:"status"})}).then(r=>{setRuns(r.runs);setKeyConfigured(r.keyConfigured);setScheduleConfigured(r.scheduleConfigured)}).catch(e=>setMsg(e instanceof Error?e.message:"状態を読み込めませんでした。"))},[]);
-  async function runNow(){setBusy(true);setMsg("");try{const r=await appFetch<{runs:BackupRun[]}>("/api/backup",{method:"POST",body:JSON.stringify({action:"run"})});setRuns(r.runs);setMsg("バックアップを保存しました。")}catch(e){setMsg(e instanceof Error?e.message:"バックアップに失敗しました。")}finally{setBusy(false)}}
+  async function runNow(){setBusy(true);setMsg("");try{const r=await appFetch<{runs:BackupRun[]}>("/api/backup",{method:"POST",body:JSON.stringify({action:"run"})});setRuns(r.runs);setMsg("バックアップを保存しました。")}catch(e){setMsg(e instanceof Error?e.message:"バックアップに失敗しました。");appFetch<{runs:BackupRun[]}>("/api/backup",{method:"POST",body:JSON.stringify({action:"status"})}).then(r=>setRuns(r.runs)).catch(()=>{})}finally{setBusy(false)}}
   const fmt=(iso:string)=>new Intl.DateTimeFormat("ja-JP",{timeZone:"Asia/Tokyo",month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"}).format(new Date(iso));
   const last=runs?.[0];
   return <section className="card p-5"><h2 className="flex items-center gap-2 font-black"><Save/>データのバックアップ</h2>

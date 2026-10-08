@@ -17,8 +17,8 @@ export async function POST(request: Request) {
     if (!parsed.success) return Response.json({ error: "invalid_input" }, { status: 400 });
 
     if (parsed.data.action === "run") {
-      // 連打防止：直近5分以内に手動で取っていたら断る
-      const recent = await supabase.from("backup_runs").select("id").eq("club_id", member.club_id).eq("trigger", "manual").gte("created_at", new Date(Date.now() - 5 * 60 * 1000).toISOString()).limit(1);
+      // 連打防止：直近5分以内に手動で成功していたら断る（失敗した直後のやり直しは通す）
+      const recent = await supabase.from("backup_runs").select("id").eq("club_id", member.club_id).eq("trigger", "manual").eq("status", "succeeded").gte("created_at", new Date(Date.now() - 5 * 60 * 1000).toISOString()).limit(1);
       if (recent.error) throw recent.error;
       if (recent.data?.length) return Response.json({ error: "too_soon", message: "さっきバックアップしたばかりです。5分ほど待ってからお試しください。" }, { status: 429 });
       const result = await backupClub(supabase, member.club_id, "manual");
