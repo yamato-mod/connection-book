@@ -31,7 +31,8 @@ export function mergeOcrResults(preferred: BusinessCardOcrResult, fallback: Busi
 
 async function cachedAsset(url: string): Promise<Response> {
   let cache: Cache | undefined;
-  try { cache = await caches.open("card-ocr-v1"); const hit = await cache.match(url); if (hit) return hit; } catch { /* cache unavailable */ }
+  try { void caches.delete("card-ocr-v1"); } catch { /* 旧モデルの片付け */ }
+  try { cache = await caches.open("card-ocr-v2"); const hit = await cache.match(url); if (hit) return hit; } catch { /* cache unavailable */ }
   const response = await fetch(url);
   if (!response.ok) throw new Error("OCR asset unavailable");
   try { await cache?.put(url, response.clone()); } catch { /* quota or private browsing */ }
@@ -42,8 +43,8 @@ export async function recognizeNewModel(image: Blob, signal: AbortSignal): Promi
   const check = () => { if (signal.aborted) throw new Error("timeout"); };
   const [{ createWorker, PSM }, ort, model, characters] = await Promise.all([
     import("tesseract.js"), import("onnxruntime-web/wasm"),
-    cachedAsset("/models/card-ocr-v1/recognizer.onnx").then(r => r.arrayBuffer()),
-    cachedAsset("/models/card-ocr-v1/characters.txt").then(r => r.text()),
+    cachedAsset("/models/card-ocr-v2/recognizer.onnx").then(r => r.arrayBuffer()),
+    cachedAsset("/models/card-ocr-v2/characters.txt").then(r => r.text()),
   ]);
   check();
   ort.env.wasm.wasmPaths = "/ort/";
